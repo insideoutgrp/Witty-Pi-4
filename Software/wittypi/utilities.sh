@@ -118,6 +118,8 @@ if [ -z ${I2C_MC_ADDRESS+x} ]; then
   fi
 
   TIME_UNKNOWN=0
+
+  SOFTWARE_VERSION='4.23'
 fi
 
 
@@ -142,23 +144,15 @@ one_wire_confliction()
 
 has_internet()
 {
-  resp=$(curl -s --head $INTERNET_SERVER)
-  if [[ ${#resp} -ne 0 ]] ; then
-    return 0
-  else
-    return 1
-  fi
+  curl -s --head --connect-timeout 3 "$INTERNET_SERVER" > /dev/null
+  return $?
 }
 
 get_network_timestamp()
 {
-  if $(has_internet) ; then
-    local t=$(curl -s --head $INTERNET_SERVER | grep ^Date: | sed 's/Date: //g')
-    if [ ! -z "$t" ]; then
-      echo $(date -d "$t" +%s)
-    else
-      echo -1
-    fi
+  local t=$(curl -sI --connect-timeout 3 "$INTERNET_SERVER" | grep -i "^Date:" | sed 's/Date: //Ig' | tr -d '\r')
+  if [ -n "$t" ]; then
+    date -d "$t" +%s 2>/dev/null || echo -1
   else
     echo -1
   fi

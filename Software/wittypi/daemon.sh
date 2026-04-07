@@ -11,7 +11,7 @@ cur_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$cur_dir/utilities.sh"
 
 TIME_UNKNOWN=1
-log 'Witty Pi daemon (v4.22) is started.'
+log "Witty Pi daemon (v${SOFTWARE_VERSION}) is started."
 
 # system information
 os=$(get_os)

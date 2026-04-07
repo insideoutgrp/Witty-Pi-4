@@ -5,14 +5,6 @@
 # Run this application to interactly configure your Witty Pi
 #
 
-echo '================================================================================'
-echo '|                                                                              |'
-echo '|   Witty Pi - Realtime Clock + Power Management for Raspberry Pi              |'
-echo '|                                                                              |'
-echo '|            < Version 4.22 >     by Dun Cat B.V. (UUGear)                     |'
-echo '|                                                                              |'
-echo '================================================================================'
-
 # include utilities scripts in same directory
 my_dir="`dirname \"$0\"`"
 my_dir="`( cd \"$my_dir\" && pwd )`"
@@ -20,6 +12,14 @@ if [ -z "$my_dir" ] ; then
   exit 1
 fi
 . $my_dir/utilities.sh
+
+echo '================================================================================'
+echo '|                                                                              |'
+echo '|   Witty Pi - Realtime Clock + Power Management for Raspberry Pi              |'
+echo '|                                                                              |'
+echo "|            < Version ${SOFTWARE_VERSION} >     by Dun Cat B.V. (UUGear)                     |"
+echo '|                                                                              |'
+echo '================================================================================'
 
 if [ $(is_mc_connected) -ne 1 ]; then
   echo ''
