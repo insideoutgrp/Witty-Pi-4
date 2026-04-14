@@ -84,9 +84,13 @@ schedule_startup()
     else
       local res=$(check_sys_and_rtc_time)
       if [ -z "$res" ]; then
-        log "  Seting startup time to \"$when\""
+        log "  Seting startup time to \"$when\" (local time)"
         IFS=' ' read -r date timestr <<< "$when"
         IFS=':' read -r hour minute second <<< "$timestr"
+        # Convert local time to UTC for alarm registers (two-step: local->epoch->UTC)
+        local epoch=$(TZ=$LOCAL_TZ date -d "$(TZ=$LOCAL_TZ date +%Y-%m-)$date $hour:$minute:$second" +%s)
+        local utc_vals=$(date -u -d @$epoch +"%d %H %M %S")
+        IFS=' ' read -r date hour minute second <<< "$utc_vals"
         set_startup_time $date $hour $minute $second
         log '  Done :-)'
       else
@@ -120,9 +124,13 @@ schedule_shutdown()
     else
       local res=$(check_sys_and_rtc_time)
       if [ -z "$res" ]; then
-        log "  Seting shutdown time to \"$when\""
+        log "  Seting shutdown time to \"$when\" (local time)"
         IFS=' ' read -r date timestr <<< "$when"
         IFS=':' read -r hour minute second <<< "$timestr"
+        # Convert local time to UTC for alarm registers (two-step: local->epoch->UTC)
+        local epoch=$(TZ=$LOCAL_TZ date -d "$(TZ=$LOCAL_TZ date +%Y-%m-)$date $hour:$minute:$second" +%s)
+        local utc_vals=$(date -u -d @$epoch +"%d %H %M %S")
+        IFS=' ' read -r date hour minute second <<< "$utc_vals"
         set_shutdown_time $date $hour $minute $second
         log '  Done :-)'
       else
@@ -600,14 +608,14 @@ while true; do
   echo '  2. Write RTC time to system'
   echo '  3. Synchronize with network time'
   echo -n '  4. Schedule next shutdown'
-  shutdown_time=$(get_shutdown_time)
+  shutdown_time=$(get_shutdown_time_local)
   if [ "$shutdown_time" == "00 00:00:00" ]; then
     echo ''
   else
     echo " [$shutdown_time]";
   fi
   echo -n '  5. Schedule next startup'
-  startup_time=$(get_startup_time)
+  startup_time=$(get_startup_time_local)
   if [ "$startup_time" == "00 00:00:00" ]; then
     echo ''
   else

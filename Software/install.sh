@@ -122,14 +122,81 @@ else
   fi
 fi
 
-# install wittyPi
+# source directory (where install.sh lives, containing wittypi/)
+SRC_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/wittypi"
+
+# scripts that carry the DST fix (v4.24)
+UPDATE_FILES="utilities.sh daemon.sh runScript.sh wittyPi.sh"
+
+# install or update wittyPi
 if [ $ERR -eq 0 ]; then
-  echo '>>> Install wittypi'
   if [ -d "wittypi" ]; then
-    echo 'Seems wittypi is installed already, skip this step.'
+    # --- existing installation: update scripts ---
+    CURRENT_VER=$(grep "SOFTWARE_VERSION=" "wittypi/utilities.sh" | head -1 | grep -o "'[^']*'" | tr -d "'")
+    TARGET_VER=$(grep "SOFTWARE_VERSION=" "$SRC_DIR/utilities.sh" | head -1 | grep -o "'[^']*'" | tr -d "'")
+    echo ">>> Existing Witty Pi installation found (v${CURRENT_VER:-unknown})"
+    if [ "$CURRENT_VER" = "$TARGET_VER" ]; then
+      echo "  Already at v${TARGET_VER}, no update needed."
+    else
+      echo "  Updating to v${TARGET_VER}..."
+
+      # backup current scripts
+      BACKUP_DIR="wittypi/backup_v${CURRENT_VER:-old}_$(date +%Y%m%d_%H%M%S)"
+      echo "  Creating backup in $BACKUP_DIR"
+      mkdir -p "$BACKUP_DIR"
+      for f in $UPDATE_FILES; do
+        if [ -f "wittypi/$f" ]; then
+          cp "wittypi/$f" "$BACKUP_DIR/$f"
+        fi
+      done
+
+      # copy updated scripts
+      for f in $UPDATE_FILES; do
+        if [ -f "$SRC_DIR/$f" ]; then
+          cp "$SRC_DIR/$f" "wittypi/$f" || ((ERR++))
+          chmod +x "wittypi/$f"
+          echo "  Updated $f"
+        fi
+      done
+
+      chown -R $SUDO_USER:$(id -g -n $SUDO_USER) wittypi || ((ERR++))
+
+      # restart daemon so new code takes effect
+      if [ -f /var/run/wittypi_daemon.pid ]; then
+        OLD_PID=$(cat /var/run/wittypi_daemon.pid 2>/dev/null)
+        if [ ! -z "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+          kill "$OLD_PID" 2>/dev/null
+          sleep 1
+          echo '  Stopped old daemon.'
+        fi
+      fi
+      "$DIR/daemon.sh" &
+      sleep 1
+      DAEMON_PID=$(ps --ppid $! -o pid= 2>/dev/null)
+      if [ ! -z "$DAEMON_PID" ]; then
+        echo "$DAEMON_PID" > /var/run/wittypi_daemon.pid
+        echo "  Daemon restarted (PID: $DAEMON_PID)."
+      fi
+
+      echo ''
+      echo '  RTC will be migrated to UTC automatically.'
+      echo '  If offline, run wittyPi.sh and choose option 1 (Write system time to RTC)'
+      echo '  after verifying your system clock is correct.'
+      echo ''
+      echo "  To rollback: sudo cp $BACKUP_DIR/* wittypi/ && sudo reboot"
+    fi
   else
-    wget https://www.uugear.com/repo/WittyPi4/LATEST -O wittyPi.zip || ((ERR++))
-    unzip wittyPi.zip -d wittypi || ((ERR++))
+    # --- fresh installation ---
+    echo '>>> Install wittypi'
+    if [ -d "$SRC_DIR" ]; then
+      # install from local source
+      cp -r "$SRC_DIR" wittypi || ((ERR++))
+    else
+      # fallback: download from UUGear
+      wget https://www.uugear.com/repo/WittyPi4/LATEST -O wittyPi.zip || ((ERR++))
+      unzip wittyPi.zip -d wittypi || ((ERR++))
+      rm wittyPi.zip
+    fi
     cd wittypi
     chmod +x wittyPi.sh
     chmod +x daemon.sh
@@ -145,7 +212,6 @@ if [ $ERR -eq 0 ]; then
     cd ..
     chown -R $SUDO_USER:$(id -g -n $SUDO_USER) wittypi || ((ERR++))
     sleep 2
-    rm wittyPi.zip
   fi
 fi
 

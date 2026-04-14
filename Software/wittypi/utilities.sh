@@ -119,7 +119,9 @@ if [ -z ${I2C_MC_ADDRESS+x} ]; then
 
   TIME_UNKNOWN=0
 
-  SOFTWARE_VERSION='4.23'
+  SOFTWARE_VERSION='4.24'
+
+  readonly LOCAL_TZ='Europe/London'
 fi
 
 
@@ -191,7 +193,7 @@ get_arch()
 
 get_sys_time()
 {
-  echo $(date +'%Y-%m-%d %H:%M:%S %Z')
+  echo $(TZ=$LOCAL_TZ date +'%Y-%m-%d %H:%M:%S %Z')
 }
 
 get_sys_timestamp()
@@ -217,7 +219,7 @@ get_rtc_timestamp()
   date=$(bcd2dec $(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_RTC_DAYS))
   month=$(bcd2dec $(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_RTC_MONTHS))
   year=$(bcd2dec $(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_RTC_YEARS))
-  echo $(date --date="$year-$month-$date $hour:$min:$sec" +%s)
+  echo $(date -u --date="$year-$month-$date $hour:$min:$sec" +%s)
 }
 
 get_rtc_time()
@@ -226,7 +228,7 @@ get_rtc_time()
   if [ "$rtc_ts" == "" ] ; then
     echo 'N/A'
   else
-    echo $(date +'%Y-%m-%d %H:%M:%S %Z' -d @$rtc_ts)
+    echo $(TZ=$LOCAL_TZ date +'%Y-%m-%d %H:%M:%S %Z' -d @$rtc_ts)
   fi
 }
 
@@ -307,6 +309,28 @@ set_shutdown_time()
   i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_DAY_ALARM2 $date
 }
 
+get_startup_time_local()
+{
+  local raw=$(get_startup_time)
+  if [ "$raw" == "00 00:00:00" ]; then
+    echo "$raw"
+  else
+    local utc_ts=$(date -u --date="$(date -u +%Y-%m-)$raw" +%s)
+    TZ=$LOCAL_TZ date -d @$utc_ts +'%d %H:%M:%S'
+  fi
+}
+
+get_shutdown_time_local()
+{
+  local raw=$(get_shutdown_time)
+  if [ "$raw" == "00 00:00:00" ]; then
+    echo "$raw"
+  else
+    local utc_ts=$(date -u --date="$(date -u +%Y-%m-)$raw" +%s)
+    TZ=$LOCAL_TZ date -d @$utc_ts +'%d %H:%M:%S'
+  fi
+}
+
 clear_shutdown_time()
 {
   i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_SECOND_ALARM2 0x00
@@ -329,15 +353,15 @@ net_to_system()
 
 system_to_rtc()
 {
-  log '  Writing system time to RTC...'
+  log '  Writing system time to RTC (as UTC)...'
   local sys_ts=$(get_sys_timestamp)
-  local sec=$(date -d @$sys_ts +%S)
-  local min=$(date -d @$sys_ts +%M)
-  local hour=$(date -d @$sys_ts +%H)
-  local day=$(date -d @$sys_ts +%u)
-  local date=$(date -d @$sys_ts +%d)
-  local month=$(date -d @$sys_ts +%m)
-  local year=$(date -d @$sys_ts +%y)
+  local sec=$(date -u -d @$sys_ts +%S)
+  local min=$(date -u -d @$sys_ts +%M)
+  local hour=$(date -u -d @$sys_ts +%H)
+  local day=$(date -u -d @$sys_ts +%u)
+  local date=$(date -u -d @$sys_ts +%d)
+  local month=$(date -u -d @$sys_ts +%m)
+  local year=$(date -u -d @$sys_ts +%y)
   i2c_write ${I2C_BUS} $I2C_MC_ADDRESS 58 $(dec2bcd $sec)
   i2c_write ${I2C_BUS} $I2C_MC_ADDRESS 59 $(dec2bcd $min)
   i2c_write ${I2C_BUS} $I2C_MC_ADDRESS 60 $(dec2bcd $hour)
@@ -381,9 +405,9 @@ log2file()
 {
   local datetime='[xxxx-xx-xx xx:xx:xx]'
   if [ $TIME_UNKNOWN -eq 0 ]; then
-    datetime=$(date +'[%Y-%m-%d %H:%M:%S]')
+    datetime=$(TZ=$LOCAL_TZ date +'[%Y-%m-%d %H:%M:%S]')
   elif [ $TIME_UNKNOWN -eq 2 ]; then
-    datetime=$(date +'<%Y-%m-%d %H:%M:%S>')
+    datetime=$(TZ=$LOCAL_TZ date +'<%Y-%m-%d %H:%M:%S>')
   fi
   local msg="$datetime $1"
   echo $msg >> $wittypi_home/wittyPi.log
@@ -507,8 +531,8 @@ schedule_script_interrupted()
   local startup_time=$(get_startup_time)
   local shutdown_time=$(get_shutdown_time)
   if [ "$startup_time" != '00 00:00:00' ] && [ "$shutdown_time" != '00 00:00:00' ] ; then
-    local st_timestamp=$(date --date="$(date +%Y-%m-)$startup_time" +%s)
-    local sd_timestamp=$(date --date="$(date +%Y-%m-)$shutdown_time" +%s)
+    local st_timestamp=$(date -u --date="$(date -u +%Y-%m-)$startup_time" +%s)
+    local sd_timestamp=$(date -u --date="$(date -u +%Y-%m-)$shutdown_time" +%s)
     local cur_timestamp=$(date +%s)
     if [ $st_timestamp -gt $cur_timestamp ] && [ $sd_timestamp -lt $cur_timestamp ] ; then
       return 0
@@ -688,8 +712,8 @@ check_sys_and_rtc_time()
   local sys_ts=$(get_sys_timestamp)
   local delta=$((rtc_ts-sys_ts))
   if [ "${delta#-}" -gt 10 ]; then
-    local rtc_t=$(date +'%Y-%m-%d %H:%M:%S %Z' -d @$rtc_ts)
-    local sys_t=$(date +'%Y-%m-%d %H:%M:%S %Z' -d @$sys_ts)
+    local rtc_t=$(TZ=$LOCAL_TZ date +'%Y-%m-%d %H:%M:%S %Z' -d @$rtc_ts)
+    local sys_t=$(TZ=$LOCAL_TZ date +'%Y-%m-%d %H:%M:%S %Z' -d @$sys_ts)
     echo "[Warning] System and RTC time seems not synchronized, difference is ${delta#-}s."
     echo "System time is \"$sys_t\", while RTC time is \"$rtc_t\"."
     echo 'Please synchronize the time first.'

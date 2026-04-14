@@ -24,7 +24,7 @@ done
 
 # get current timestamp
 cur_time=$(current_timestamp)
-echo "--------------- $(date -d @$cur_time +'%Y-%m-%d %H:%M:%S') ---------------"
+echo "--------------- $(TZ=$LOCAL_TZ date -d @$cur_time +'%Y-%m-%d %H:%M:%S') ---------------"
 
 extract_timestamp()
 {
@@ -32,7 +32,7 @@ extract_timestamp()
   local date_reg='(20[1-9][0-9])-([0-9][0-9])-([0-3][0-9])'
   local time_reg='([0-2][0-9]):([0-5][0-9]):([0-5][0-9])'
   if [[ $date =~ $date_reg ]] && [[ $timestr =~ $time_reg ]] ; then
-    echo $(date -d "$date $timestr" +%s)
+    echo $(TZ=$LOCAL_TZ date -d "$date $timestr" +%s)
   else
     echo 0
   fi
@@ -66,12 +66,12 @@ setup_off_state()
   local res=$(check_sys_and_rtc_time)
   if [ ! -z "$res" ]; then
     log "$res"
-  fi 
-  log "Schedule next startup at:  $(date -d @$1 +'%Y-%m-%d %H:%M:%S')"
-  local date=$(date -d "@$1" +"%d")
-  local hour=$(date -d "@$1" +"%H")
-  local minute=$(date -d "@$1" +"%M")
-  local second=$(date -d "@$1" +"%S")
+  fi
+  log "Schedule next startup at:  $(TZ=$LOCAL_TZ date -d @$1 +'%Y-%m-%d %H:%M:%S %Z')"
+  local date=$(date -u -d "@$1" +"%d")
+  local hour=$(date -u -d "@$1" +"%H")
+  local minute=$(date -u -d "@$1" +"%M")
+  local second=$(date -u -d "@$1" +"%S")
   set_startup_time $date $hour $minute $second
 }
 
@@ -80,12 +80,12 @@ setup_on_state()
   local res=$(check_sys_and_rtc_time)
   if [ ! -z "$res" ]; then
     log "$res"
-  fi 
-  log "Schedule next shutdown at: $(date -d @$1 +'%Y-%m-%d %H:%M:%S')"
-  local date=$(date -d "@$1" +"%d")
-  local hour=$(date -d "@$1" +"%H")
-  local minute=$(date -d "@$1" +"%M")
-  local second=$(date -d "@$1" +"%S")
+  fi
+  log "Schedule next shutdown at: $(TZ=$LOCAL_TZ date -d @$1 +'%Y-%m-%d %H:%M:%S %Z')"
+  local date=$(date -u -d "@$1" +"%d")
+  local hour=$(date -u -d "@$1" +"%H")
+  local minute=$(date -u -d "@$1" +"%M")
+  local second=$(date -u -d "@$1" +"%S")
   set_shutdown_time $date $hour $minute $second
 }
 
