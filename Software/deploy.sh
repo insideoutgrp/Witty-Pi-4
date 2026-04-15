@@ -119,6 +119,17 @@ if [ ! -z "$WITTYPI_DIR" ] && [ -f "$WITTYPI_DIR/utilities.sh" ]; then
     echo '  Daemon will start on next reboot.'
   fi
 
+  # set up cron job for periodic time sync
+  echo ''
+  echo '>>> Setting up periodic time sync'
+  CRON_CMD="$WITTYPI_DIR/syncTime.sh >> $WITTYPI_DIR/wittyPi.log 2>&1"
+  if crontab -l 2>/dev/null | grep -qF 'syncTime.sh'; then
+    echo '  Cron job already exists, skip this step.'
+  else
+    (crontab -l 2>/dev/null; echo "0 */6 * * * $CRON_CMD") | crontab -
+    echo '  Cron job installed: sync time every 6 hours.'
+  fi
+
   echo ''
   echo '================================================================================'
   echo "  Update complete! v${CURRENT_VER} -> v${TARGET_VER}"
