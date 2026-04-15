@@ -1,0 +1,17 @@
+#On for an hour every week day, 24/7 weekend
+
+BEGIN	2022-01-03 12:00:00
+END	2030-01-01 00:00:00
+
+ON	H1
+OFF	H23
+ON      H1
+OFF     H23
+ON	H1
+OFF	H23
+ON      H1
+OFF     H23
+ON	H1
+OFF	D2 H23
+
+

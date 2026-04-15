@@ -78,6 +78,15 @@ if [ ! -z "$WITTYPI_DIR" ] && [ -f "$WITTYPI_DIR/utilities.sh" ]; then
     fi
   done
 
+  # update schedules
+  if [ -d "$SRC_DIR/../Schedules" ]; then
+    echo ''
+    echo '>>> Updating schedules'
+    mkdir -p "$WITTYPI_DIR/schedules"
+    cp "$SRC_DIR/../Schedules/"*.wpi "$WITTYPI_DIR/schedules/" 2>/dev/null
+    echo "  Copied $(ls "$SRC_DIR/../Schedules/"*.wpi 2>/dev/null | wc -l | tr -d ' ') schedule(s) to $WITTYPI_DIR/schedules/"
+  fi
+
   # also update install.sh in parent dir
   INSTALL_DIR="$(dirname "$WITTYPI_DIR")"
   if [ -f "$SRC_DIR/install.sh" ]; then

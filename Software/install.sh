@@ -159,6 +159,14 @@ if [ $ERR -eq 0 ]; then
         fi
       done
 
+      # update schedules
+      SCHED_SRC="$(dirname "$SRC_DIR")/../Schedules"
+      if [ -d "$SCHED_SRC" ]; then
+        mkdir -p "wittypi/schedules"
+        cp "$SCHED_SRC/"*.wpi "wittypi/schedules/" 2>/dev/null
+        echo "  Updated schedules"
+      fi
+
       chown -R $SUDO_USER:$(id -g -n $SUDO_USER) wittypi || ((ERR++))
 
       # restart daemon so new code takes effect
@@ -209,6 +217,12 @@ if [ $ERR -eq 0 ]; then
     update-rc.d wittypi defaults || ((ERR++))
     touch wittyPi.log
     touch schedule.log
+    # copy custom schedules
+    SCHED_SRC="$(dirname "$SRC_DIR")/../Schedules"
+    if [ -d "$SCHED_SRC" ]; then
+      cp "$SCHED_SRC/"*.wpi schedules/ 2>/dev/null
+      echo '  Installed custom schedules'
+    fi
     cd ..
     chown -R $SUDO_USER:$(id -g -n $SUDO_USER) wittypi || ((ERR++))
     sleep 2
