@@ -123,12 +123,9 @@ if [ ! -z "$WITTYPI_DIR" ] && [ -f "$WITTYPI_DIR/utilities.sh" ]; then
   echo ''
   echo '>>> Setting up periodic time sync'
   CRON_CMD="$WITTYPI_DIR/syncTime.sh >> $WITTYPI_DIR/wittyPi.log 2>&1"
-  if crontab -l 2>/dev/null | grep -qF 'syncTime.sh'; then
-    echo '  Cron job already exists, skip this step.'
-  else
-    (crontab -l 2>/dev/null; echo "*/15 * * * * $CRON_CMD") | crontab -
-    echo '  Cron job installed: sync time every 15 minutes.'
-  fi
+  # remove any existing syncTime cron entry then add the current one
+  (crontab -l 2>/dev/null | grep -vF 'syncTime.sh'; echo "*/15 * * * * $CRON_CMD") | crontab -
+  echo '  Cron job set: sync time every 15 minutes.'
 
   echo ''
   echo '================================================================================'

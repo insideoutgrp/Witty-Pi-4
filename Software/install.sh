@@ -229,15 +229,12 @@ if [ $ERR -eq 0 ]; then
   fi
 fi
 
-# set up cron job for periodic time sync (every 6 hours)
+# set up cron job for periodic time sync
 echo '>>> Setting up periodic time sync'
 CRON_CMD="$DIR/syncTime.sh >> $DIR/wittyPi.log 2>&1"
-if crontab -l 2>/dev/null | grep -qF 'syncTime.sh'; then
-  echo '  Cron job already exists, skip this step.'
-else
-  (crontab -l 2>/dev/null; echo "*/15 * * * * $CRON_CMD") | crontab -
-  echo '  Cron job installed: sync time every 15 minutes.'
-fi
+# remove any existing syncTime cron entry then add the current one
+(crontab -l 2>/dev/null | grep -vF 'syncTime.sh'; echo "*/15 * * * * $CRON_CMD") | crontab -
+echo '  Cron job set: sync time every 15 minutes.'
 
 # install UUGear Web Interface
 curl https://www.uugear.com/repo/UWI/installUWI.sh | bash
