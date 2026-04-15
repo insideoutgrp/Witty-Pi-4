@@ -67,13 +67,18 @@ setup_off_state()
   if [ ! -z "$res" ]; then
     log "$res"
   fi
-  # correct for DST drift between schedule BEGIN and this alarm
-  local corrected=$(dst_correct $begin $1)
-  log "Schedule next startup at:  $(TZ=$LOCAL_TZ date -d @$corrected +'%Y-%m-%d %H:%M:%S %Z')"
-  local date=$(date -u -d "@$corrected" +"%d")
-  local hour=$(date -u -d "@$corrected" +"%H")
-  local minute=$(date -u -d "@$corrected" +"%M")
-  local second=$(date -u -d "@$corrected" +"%S")
+  # only apply DST correction for daily/weekly schedules (cycle >= 24h and
+  # a multiple of 24h) where times represent wall-clock hours.
+  # Short interval schedules (e.g. 15-min cycles) are left uncorrected.
+  local alarm_ts=$1
+  if [ $script_duration -gt 0 ] && [ $((script_duration % 86400)) -eq 0 ]; then
+    alarm_ts=$(dst_correct $begin $1)
+  fi
+  log "Schedule next startup at:  $(TZ=$LOCAL_TZ date -d @$alarm_ts +'%Y-%m-%d %H:%M:%S %Z')"
+  local date=$(date -u -d "@$alarm_ts" +"%d")
+  local hour=$(date -u -d "@$alarm_ts" +"%H")
+  local minute=$(date -u -d "@$alarm_ts" +"%M")
+  local second=$(date -u -d "@$alarm_ts" +"%S")
   set_startup_time $date $hour $minute $second
 }
 
@@ -83,13 +88,15 @@ setup_on_state()
   if [ ! -z "$res" ]; then
     log "$res"
   fi
-  # correct for DST drift between schedule BEGIN and this alarm
-  local corrected=$(dst_correct $begin $1)
-  log "Schedule next shutdown at: $(TZ=$LOCAL_TZ date -d @$corrected +'%Y-%m-%d %H:%M:%S %Z')"
-  local date=$(date -u -d "@$corrected" +"%d")
-  local hour=$(date -u -d "@$corrected" +"%H")
-  local minute=$(date -u -d "@$corrected" +"%M")
-  local second=$(date -u -d "@$corrected" +"%S")
+  local alarm_ts=$1
+  if [ $script_duration -gt 0 ] && [ $((script_duration % 86400)) -eq 0 ]; then
+    alarm_ts=$(dst_correct $begin $1)
+  fi
+  log "Schedule next shutdown at: $(TZ=$LOCAL_TZ date -d @$alarm_ts +'%Y-%m-%d %H:%M:%S %Z')"
+  local date=$(date -u -d "@$alarm_ts" +"%d")
+  local hour=$(date -u -d "@$alarm_ts" +"%H")
+  local minute=$(date -u -d "@$alarm_ts" +"%M")
+  local second=$(date -u -d "@$alarm_ts" +"%S")
   set_shutdown_time $date $hour $minute $second
 }
 
