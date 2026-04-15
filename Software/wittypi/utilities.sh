@@ -119,7 +119,7 @@ if [ -z ${I2C_MC_ADDRESS+x} ]; then
 
   TIME_UNKNOWN=0
 
-  SOFTWARE_VERSION='4.28'
+  SOFTWARE_VERSION='4.29'
 
   readonly LOCAL_TZ='Europe/London'
 fi
@@ -391,11 +391,19 @@ trim()
 
 current_timestamp()
 {
-  local rtctimestamp=$(get_rtc_timestamp)
-  if [ "$rtctimestamp" == "" ] ; then
-    echo $(date +%s)
+  # prefer system time (kept accurate by NTP) over RTC
+  local sys_ts=$(date +%s)
+  local sys_year=$(date -u -d @$sys_ts +%Y)
+  if [ "$sys_year" -gt 2020 ] 2>/dev/null; then
+    echo $sys_ts
   else
-    echo $rtctimestamp
+    # system time not initialised yet, fall back to RTC
+    local rtctimestamp=$(get_rtc_timestamp)
+    if [ "$rtctimestamp" == "" ] ; then
+      echo $sys_ts
+    else
+      echo $rtctimestamp
+    fi
   fi
 }
 

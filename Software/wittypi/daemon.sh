@@ -59,12 +59,16 @@ if [ $has_mc == 1 ] ; then
   # make sure register I2C_RTC_CTRL1 is 0
   i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_RTC_CTRL1 0
   
-  # synchronize system and RTC time
-  if [ $(rtc_has_bad_time) == 1 ]; then
-    log 'RTC has bad time, write system time into RTC'
+  # synchronize time: prefer network, then RTC as fallback
+  if has_internet ; then
+    log 'Internet available, syncing time from network...'
+    net_to_system
+    system_to_rtc
+  elif [ $(rtc_has_bad_time) == 1 ]; then
+    log 'RTC has bad time and no internet, write system time into RTC'
     system_to_rtc
   else
-    log 'Seems RTC has good time, write RTC time into system'
+    log 'No internet, using RTC time'
     rtc_to_system
   fi
 

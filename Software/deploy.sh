@@ -119,6 +119,16 @@ if [ ! -z "$WITTYPI_DIR" ] && [ -f "$WITTYPI_DIR/utilities.sh" ]; then
     echo '  Daemon will start on next reboot.'
   fi
 
+  # immediate time sync to migrate RTC to UTC
+  echo ''
+  echo '>>> Syncing time and migrating RTC to UTC'
+  "$WITTYPI_DIR/syncTime.sh" >> "$WITTYPI_DIR/wittyPi.log" 2>&1
+  if [ $? -eq 0 ]; then
+    echo '  RTC migrated to UTC.'
+  else
+    echo '  No internet - RTC will be migrated on next sync.'
+  fi
+
   # set up cron job for periodic time sync
   echo ''
   echo '>>> Setting up periodic time sync'
