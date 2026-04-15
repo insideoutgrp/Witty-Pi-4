@@ -126,8 +126,8 @@ if [ ! -z "$WITTYPI_DIR" ] && [ -f "$WITTYPI_DIR/utilities.sh" ]; then
   if crontab -l 2>/dev/null | grep -qF 'syncTime.sh'; then
     echo '  Cron job already exists, skip this step.'
   else
-    (crontab -l 2>/dev/null; echo "0 */6 * * * $CRON_CMD") | crontab -
-    echo '  Cron job installed: sync time every 6 hours.'
+    (crontab -l 2>/dev/null; echo "*/15 * * * * $CRON_CMD") | crontab -
+    echo '  Cron job installed: sync time every 15 minutes.'
   fi
 
   echo ''

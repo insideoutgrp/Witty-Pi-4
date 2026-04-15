@@ -119,7 +119,7 @@ if [ -z ${I2C_MC_ADDRESS+x} ]; then
 
   TIME_UNKNOWN=0
 
-  SOFTWARE_VERSION='4.27'
+  SOFTWARE_VERSION='4.28'
 
   readonly LOCAL_TZ='Europe/London'
 fi
