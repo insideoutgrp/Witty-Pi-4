@@ -119,7 +119,7 @@ if [ -z ${I2C_MC_ADDRESS+x} ]; then
 
   TIME_UNKNOWN=0
 
-  SOFTWARE_VERSION='4.29'
+  SOFTWARE_VERSION='4.30'
 
   readonly LOCAL_TZ='Europe/London'
 fi
@@ -387,6 +387,34 @@ trim()
 {
   local result=$(echo "$1" | sed -n '1h;1!H;${;g;s/^[ \t]*//g;s/[ \t]*$//g;p;}')
   echo $result
+}
+
+get_utc_offset_seconds()
+{
+  # Returns UTC offset in seconds for a given epoch in LOCAL_TZ
+  # e.g. GMT=0, BST=3600
+  local z=$(TZ=$LOCAL_TZ date -d @$1 +%z)
+  local sign=${z:0:1}
+  local hours=$((10#${z:1:2}))
+  local mins=$((10#${z:3:2}))
+  local secs=$(( hours * 3600 + mins * 60 ))
+  if [ "$sign" = "-" ]; then
+    secs=$((-secs))
+  fi
+  echo $secs
+}
+
+dst_correct()
+{
+  # Corrects an alarm epoch for DST drift relative to a schedule's BEGIN epoch.
+  # When durations are added as fixed seconds, the local time-of-day drifts by
+  # the DST offset difference. This function snaps the alarm back to the
+  # intended local time.
+  local begin_epoch=$1
+  local alarm_epoch=$2
+  local begin_off=$(get_utc_offset_seconds $begin_epoch)
+  local alarm_off=$(get_utc_offset_seconds $alarm_epoch)
+  echo $(( alarm_epoch + begin_off - alarm_off ))
 }
 
 current_timestamp()
