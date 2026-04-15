@@ -502,30 +502,6 @@ clear_alarm_flags()
   i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_FLAG_ALARM2 0
 }
 
-do_shutdown()
-{
-  local halt_pin=$1
-  local has_mc=$2
-
-  # restore halt pin
-  gpio -g mode $halt_pin in
-  gpio -g mode $halt_pin up
-
-  # clear alarm flags
-  if [ "$has_mc" == "1" ] ; then
-    clear_alarm_flags
-  fi
-
-  log 'Halting all processes and then shutdown Raspberry Pi...'
-
-  # halt everything and shutdown
-  if [ ! -f /boot/wittypi.lock ]; then
-    shutdown -h now
-  else
-    rm /boot/wittypi.lock
-  fi
-}
-
 schedule_script_interrupted()
 {
   local startup_time=$(get_startup_time)

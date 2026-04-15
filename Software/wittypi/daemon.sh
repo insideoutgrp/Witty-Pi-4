@@ -36,10 +36,6 @@ if ! hash gpio 2>/dev/null; then
   exit
 fi
 
-# make sure the halt pin is input with internal pull up
-gpio -g mode $HALT_PIN up
-gpio -g mode $HALT_PIN in
-
 
 # check if micro controller presents
 has_mc=$(is_mc_connected)
@@ -110,9 +106,8 @@ if [ $has_mc == 1 ] ; then
     # woke up by alarm 1 (startup)
     log 'System startup as scheduled.'
   elif [ "$flag2" == "1" ] ; then
-    # woke up by alarm 2 (shutdown), turn it off immediately, this should never happen
-    log 'Seems I was unexpectedly woken up by shutdown alarm, must go back to sleep...'
-    do_shutdown $HALT_PIN $has_mc
+    # woke up by alarm 2 (shutdown) - hardware will cut power directly
+    log 'Seems I was unexpectedly woken up by shutdown alarm.'
   fi
   clear_alarm_flags
 
@@ -157,17 +152,6 @@ if [ $(($firmwareID)) -eq 55 ]; then
   gpio -g mode $STDBY_PIN in
 fi
 
-# delay until GPIO pin state gets stable
-counter=0
-while [ $counter -lt 5 ]; do  # increase this value if it needs more time
-  if [ $(gpio -g read $HALT_PIN) == '1' ] ; then
-    counter=$(($counter+1))
-  else
-    counter=0
-  fi
-  sleep 1
-done
-
 # run beforeScript.sh
 "$cur_dir/beforeScript.sh" >> "$cur_dir/wittyPi.log" 2>&1
 
@@ -194,35 +178,5 @@ gpio -g write $SYSUP_PIN 0
 sleep 0.1
 gpio -g mode $SYSUP_PIN in
 
-# wait for GPIO-4 (BCM naming) falling, or alarm 2 (shutdown)
-log 'Pending for incoming shutdown command...'
-gpio -g wfi $HALT_PIN falling
-
-if [ $has_mc == 1 ] ; then
-  reason=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_ACTION_REASON)
-  if [ "$reason" == $REASON_ALARM2 ]; then
-    log 'Shutting down system because scheduled shutdown is due.'
-  elif [ "$reason" == $REASON_CLICK ]; then
-    log "Shutting down system because button is clicked or GPIO-$HALT_PIN is pulled down."
-  elif [ "$reason" == $REASON_LOW_VOLTAGE ]; then
-    vin=$(get_input_voltage)
-    vlow=$(get_low_voltage_threshold)
-    log "Shutting down system because input voltge is too low: Vin=${vin}V, Vlow=${vlow}"
-  elif [ "$reason" == $REASON_OVER_TEMPERATURE ]; then
-    log 'Shutting down system because over temperature.'
-    log "$(get_temperature)"
-  elif [ "$reason" == $REASON_BELOW_TEMPERATURE ]; then
-    log 'Shutting down system because below temperature.'
-    log "$(get_temperature)"
-  else
-    log "Unknown/incorrect shutdown reason: $reason"
-  fi
-else
-  log 'Witty Pi is not connected, skip I2C communications...'
-fi
-
-# run beforeShutdown.sh
-"$cur_dir/beforeShutdown.sh" >> "$cur_dir/wittyPi.log" 2>&1
-
-# shutdown Raspberry Pi
-do_shutdown $HALT_PIN $has_mc
+# no GPIO-4 soft shutdown - hardware will cut power directly
+log 'Daemon startup complete. Hardware handles power cut directly.'
