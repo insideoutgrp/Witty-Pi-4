@@ -14,6 +14,8 @@ TIME_UNKNOWN=0
 
 # configurable
 readonly PING_TARGETS=('8.8.8.8' '1.1.1.1' 'www.google.com')
+readonly PING_TIMEOUT=15   # seconds - generous to accommodate 3G links
+readonly PING_COUNT=2      # attempts per target
 readonly FAIL_THRESHOLD=3
 readonly STATE_FILE="$cur_dir/.net_fail_count"
 
@@ -27,7 +29,7 @@ fi
 # try each ping target; success on any clears the counter
 online=0
 for target in "${PING_TARGETS[@]}"; do
-  if ping -c 1 -W 3 "$target" >/dev/null 2>&1; then
+  if ping -c $PING_COUNT -W $PING_TIMEOUT "$target" >/dev/null 2>&1; then
     online=1
     break
   fi
