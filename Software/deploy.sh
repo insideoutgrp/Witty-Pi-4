@@ -59,7 +59,7 @@ if [ ! -z "$WITTYPI_DIR" ] && [ -f "$WITTYPI_DIR/utilities.sh" ]; then
   fi
 
   echo "  Updating to v${TARGET_VER}..."
-  UPDATE_FILES="utilities.sh daemon.sh runScript.sh wittyPi.sh"
+  UPDATE_FILES="utilities.sh daemon.sh runScript.sh wittyPi.sh syncTime.sh checkInternet.sh"
 
   # backup
   BACKUP_DIR="$WITTYPI_DIR/backup_v${CURRENT_VER:-old}_$(date +%Y%m%d_%H%M%S)"
@@ -136,6 +136,15 @@ if [ ! -z "$WITTYPI_DIR" ] && [ -f "$WITTYPI_DIR/utilities.sh" ]; then
   # remove any existing syncTime cron entry then add the current one
   (crontab -l 2>/dev/null | grep -vF 'syncTime.sh'; echo "*/15 * * * * $CRON_CMD") | crontab -
   echo '  Cron job set: sync time every 15 minutes.'
+
+  # set up cron job for internet connectivity check (offset from syncTime)
+  echo ''
+  echo '>>> Setting up internet connectivity check'
+  NET_CHECK_CMD="$WITTYPI_DIR/checkInternet.sh >> $WITTYPI_DIR/wittyPi.log 2>&1"
+  (crontab -l 2>/dev/null | grep -vF 'checkInternet.sh'; echo "7,22,37,52 * * * * $NET_CHECK_CMD") | crontab -
+  echo '  Cron job set: check internet every 15 min (at :07/:22/:37/:52).'
+  # ensure the script is present and executable on device
+  chmod +x "$WITTYPI_DIR/checkInternet.sh" 2>/dev/null
 
   echo ''
   echo '================================================================================'

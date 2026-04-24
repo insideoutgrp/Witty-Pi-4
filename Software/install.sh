@@ -126,7 +126,7 @@ fi
 SRC_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/wittypi"
 
 # scripts that carry the DST fix (v4.24)
-UPDATE_FILES="utilities.sh daemon.sh runScript.sh wittyPi.sh"
+UPDATE_FILES="utilities.sh daemon.sh runScript.sh wittyPi.sh syncTime.sh checkInternet.sh"
 
 # install or update wittyPi
 if [ $ERR -eq 0 ]; then
@@ -235,6 +235,13 @@ CRON_CMD="$DIR/syncTime.sh >> $DIR/wittyPi.log 2>&1"
 # remove any existing syncTime cron entry then add the current one
 (crontab -l 2>/dev/null | grep -vF 'syncTime.sh'; echo "*/15 * * * * $CRON_CMD") | crontab -
 echo '  Cron job set: sync time every 15 minutes.'
+
+# set up cron job for internet connectivity check (offset so it doesn't
+# overlap with syncTime.sh at :00/:15/:30/:45)
+echo '>>> Setting up internet connectivity check'
+NET_CHECK_CMD="$DIR/checkInternet.sh >> $DIR/wittyPi.log 2>&1"
+(crontab -l 2>/dev/null | grep -vF 'checkInternet.sh'; echo "7,22,37,52 * * * * $NET_CHECK_CMD") | crontab -
+echo '  Cron job set: check internet every 15 min (at :07/:22/:37/:52).'
 
 # install UUGear Web Interface
 curl https://www.uugear.com/repo/UWI/installUWI.sh | bash
