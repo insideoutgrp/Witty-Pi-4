@@ -84,6 +84,8 @@ if [ ! -z "$WITTYPI_DIR" ] && [ -f "$WITTYPI_DIR/utilities.sh" ]; then
     echo '>>> Updating schedules'
     mkdir -p "$WITTYPI_DIR/schedules"
     cp "$SRC_DIR/../Schedules/"*.wpi "$WITTYPI_DIR/schedules/" 2>/dev/null
+    # remove retired / mislabeled schedules from existing devices
+    rm -f "$WITTYPI_DIR/schedules/1h_weekday_247_weekend.wpi"
     echo "  Copied $(ls "$SRC_DIR/../Schedules/"*.wpi 2>/dev/null | wc -l | tr -d ' ') schedule(s) to $WITTYPI_DIR/schedules/"
   fi
 
