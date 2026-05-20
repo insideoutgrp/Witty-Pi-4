@@ -12,8 +12,12 @@ if [ "$(id -u)" != 0 ]; then
   exit 1
 fi
 
-# target directory
-DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/wittypi"
+# install target: the wittypi directory under the current working directory.
+# install.sh installs into ./wittypi relative to where it is launched, so the
+# caller is responsible for running it from the desired parent directory
+# (e.g. the user's home). This must NOT be derived from the script location,
+# otherwise installs run from a source checkout would target the checkout.
+DIR="$(pwd)/wittypi"
 
 # error counter
 ERR=0
@@ -122,15 +126,18 @@ else
   fi
 fi
 
-# source directory (where install.sh lives, containing wittypi/)
-SRC_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/wittypi"
+# source directory: the wittypi folder to install FROM. Defaults to the
+# wittypi/ shipped alongside this script, but callers (e.g. deploy.sh) can
+# override it with WITTYPI_SRC so the source is never confused with the
+# install target ($DIR).
+SRC_DIR="${WITTYPI_SRC:-$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/wittypi}"
 
 # scripts that carry the DST fix (v4.24)
 UPDATE_FILES="utilities.sh daemon.sh runScript.sh wittyPi.sh syncTime.sh checkInternet.sh"
 
 # install or update wittyPi
 if [ $ERR -eq 0 ]; then
-  if [ -d "wittypi" ]; then
+  if [ -d "$DIR" ] && [ -f "$DIR/utilities.sh" ]; then
     # --- existing installation: update scripts ---
     CURRENT_VER=$(grep "SOFTWARE_VERSION=" "wittypi/utilities.sh" | head -1 | grep -o "'[^']*'" | tr -d "'")
     TARGET_VER=$(grep "SOFTWARE_VERSION=" "$SRC_DIR/utilities.sh" | head -1 | grep -o "'[^']*'" | tr -d "'")
@@ -196,8 +203,9 @@ if [ $ERR -eq 0 ]; then
   else
     # --- fresh installation ---
     echo '>>> Install wittypi'
-    if [ -d "$SRC_DIR" ]; then
-      # install from local source
+    if [ -d "$SRC_DIR" ] && [ -f "$SRC_DIR/utilities.sh" ]; then
+      # install from the local source tree
+      rm -rf wittypi
       cp -r "$SRC_DIR" wittypi || ((ERR++))
     else
       # fallback: download from UUGear
