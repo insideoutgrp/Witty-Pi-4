@@ -161,8 +161,17 @@ if [ ! -z "$WITTYPI_DIR" ] && [ -f "$WITTYPI_DIR/utilities.sh" ]; then
 else
   # --- FRESH installation ---
   echo '>>> No existing installation found. Running full install...'
-  cd "$SRC_DIR"
-  bash install.sh
+  # install.sh installs into ./wittypi relative to its working directory, so
+  # it must run from the target user's home -- NOT from inside the source
+  # checkout (which ships its own wittypi/ folder and would be mistaken for
+  # an existing install). WITTYPI_SRC points install.sh at the real source.
+  TARGET_USER="${SUDO_USER:-$(id -un)}"
+  TARGET_HOME="$(eval echo "~${TARGET_USER}")"
+  if [ -z "$TARGET_HOME" ] || [ ! -d "$TARGET_HOME" ]; then
+    TARGET_HOME='/home/pi'
+  fi
+  echo ">>> Installing Witty Pi software into $TARGET_HOME/wittypi"
+  ( cd "$TARGET_HOME" && WITTYPI_SRC="$SRC_DIR/wittypi" bash "$SRC_DIR/install.sh" )
 fi
 
 # cleanup
