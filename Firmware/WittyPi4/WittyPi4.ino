@@ -1,9 +1,37 @@
 /**
  * Firmware for WittyPi 4
  *
- * Revision: 12
+ * Revision: 13
  *
  * Changelog:
+ *   Rev 13 (2026-05-26):
+ *     - Reliability: moved sleep() out of Timer1 ISR. Now sets
+ *       a pendingSleep flag from the ISR and runs sleep() from
+ *       loop() at base context. Eliminates stack-nesting risk
+ *       on 512-byte SRAM (FIRMWARE_ISSUES.md #1).
+ *     - Reliability: added internalBusBusy mutex guarding the
+ *       softWireMaster between WDT ISR and Pi I2C transactions.
+ *       Eliminates bus-collision corruption (FIRMWARE_ISSUES.md #4).
+ *     - Reliability: widened overdue window in processAlarmIfNeeded
+ *       from 4s to 86400s (1 day). Catches alarms missed due to
+ *       WDT jitter or stale-state interruptions.
+ *     - "Any power input wakes": default I2C_CONF_DEFAULT_ON = 1
+ *       so the Pi powers on whenever main DC power is connected
+ *       (rather than requiring a button press).
+ *     - Removed dormant features for flash headroom:
+ *       * Temperature-action shutdown/startup (registers 43-46
+ *         retained as no-op for backwards compat — LM75B no
+ *         longer initialized at boot).
+ *       * Sleep-loop LED blink (saves field-deployment battery).
+ *     - Bumped I2C_FW_REVISION to 0x0D (13).
+ *   Rev 12 (2026-04-14):
+ *     - Fix: Alarm2, low voltage, and temperature shutdown paths now
+ *       reset Timer1 so power-cut delay is deterministic.
+ *     - Removed WDT turningOff timeout (root causes now fixed by
+ *       TCNT1 resets, SYS_UP retry, listenToTxd init, wider alarm
+ *       window — Timer1 hardware doesn't stall).
+ *     - Removed dummy load pulsing and forcePowerCutIfNeeded.
+ *     - Inlined getTemperature, offset2Value, value2Offset.
  *   Rev 11 (2026-04-11):
  *     - Disable physical button from initiating shutdown while the
  *       system is running. Button still works for power-on (wake from
@@ -24,14 +52,6 @@
  *       missed alarms from WDT timing jitter.
  *     - Fix: copyAlarm writes all 5 RTC alarm registers (was 4).
  *     - Fix: Missing endTransmission for LM75B CONF I2C read.
- *   Rev 12 (2026-04-14):
- *     - Fix: Alarm2, low voltage, and temperature shutdown paths now
- *       reset Timer1 so power-cut delay is deterministic.
- *     - Removed WDT turningOff timeout (root causes now fixed by
- *       TCNT1 resets, SYS_UP retry, listenToTxd init, wider alarm
- *       window — Timer1 hardware doesn't stall).
- *     - Removed dummy load pulsing and forcePowerCutIfNeeded.
- *     - Inlined getTemperature, offset2Value, value2Offset.
  *   Rev 10 (2026-04-11):
  *     - Fix: Add WDT-based turningOff safety timeout (36 seconds).
  *       If the turningOff flag remains set beyond the maximum power-cut
@@ -107,7 +127,7 @@
 #define I2C_CONF_BLINK_LED          20  // how long the white LED should stay on (in ms), 0 if white LED should not blink.
 #define I2C_CONF_POWER_CUT_DELAY    21  // the delay (x10) before power cut: default=70 (7 sec)
 #define I2C_CONF_RECOVERY_VOLTAGE   22  // voltage (x10) that triggers recovery, 255=disabled
-#define I2C_CONF_DUMMY_LOAD         23  // how long the dummy load should be applied (in ms), 0 if dummy load is off.
+#define I2C_CONF_DUMMY_LOAD         23  // (Rev13: reserved/no-op, dummy load feature removed)
 #define I2C_CONF_ADJ_VIN            24  // adjustment for measured Vin (x100), range from -127 to 127
 #define I2C_CONF_ADJ_VOUT           25  // adjustment for measured Vout (x100), range from -127 to 127
 #define I2C_CONF_ADJ_IOUT           26  // adjustment for measured Iout (x100), range from -127 to 127
@@ -132,10 +152,10 @@
 #define I2C_CONF_IGNORE_POWER_MODE  41  // set 1 to ignore I2C_POWER_MODE for low voltage shutdown and recovery
 #define I2C_CONF_IGNORE_LV_SHUTDOWN 42  // set 1 to ignore I2C_LV_SHUTDOWN for low voltage shutdown and recovery
 
-#define I2C_CONF_BELOW_TEMP_ACTION  43  // action for below temperature: 0-do nothing; 1-shutdown; 2-startup
-#define I2C_CONF_BELOW_TEMP_POINT   44  // set point for below temperature
-#define I2C_CONF_OVER_TEMP_ACTION   45  // action for over temperature: 0-do nothing; 1-shutdown; 2-startup
-#define I2C_CONF_OVER_TEMP_POINT    46  // set point for over temperature
+#define I2C_CONF_BELOW_TEMP_ACTION  43  // (Rev13: reserved/no-op, temperature-action feature removed)
+#define I2C_CONF_BELOW_TEMP_POINT   44  // (Rev13: reserved/no-op)
+#define I2C_CONF_OVER_TEMP_ACTION   45  // (Rev13: reserved/no-op)
+#define I2C_CONF_OVER_TEMP_POINT    46  // (Rev13: reserved/no-op)
 
 #define I2C_CONF_DEFAULT_ON_DELAY   47  // the delay (in second) between MCU initialization and turning on Raspberry Pi, when I2C_CONF_DEFAULT_ON = 1
 #define I2C_CONF_MISC               48  // 8 bits for miscellaneous configuration.
@@ -181,8 +201,8 @@
 #define REASON_CLICK              3
 #define REASON_LOW_VOLTAGE        4
 #define REASON_VOLTAGE_RESTORE    5
-#define REASON_OVER_TEMPERATURE   6
-#define REASON_BELOW_TEMPERATURE  7
+// REASON_OVER_TEMPERATURE  6 - reserved/removed in Rev 13
+// REASON_BELOW_TEMPERATURE 7 - reserved/removed in Rev 13
 #define REASON_ALARM1_DELAYED     8
 #define REASON_POWER_CONNECTED    10
 #define REASON_REBOOT             11
@@ -217,6 +237,16 @@ volatile byte skipAdjustRtcCount = 0;
 volatile byte skipPulseCount = 0;
 
 volatile byte skipLowVoltageDetectCount = 0;
+
+// Rev13: set by Timer1 ISR, serviced by loop() to run sleep() at base
+// context rather than nested inside the ISR (FIRMWARE_ISSUES.md #1).
+volatile boolean pendingSleep = false;
+
+// Rev13: mutex flag set when Pi I2C transactions are in progress on the
+// internal softWireMaster bus. The WDT ISR consults it and skips RTC
+// reads/writes for that tick rather than corrupting an in-flight transfer
+// (FIRMWARE_ISSUES.md #4).
+volatile uint8_t internalBusBusy = 0;
 
 volatile byte alarm1Delayed = 0;
 
@@ -296,16 +326,27 @@ void setup() {
 
 
 void loop() {
-  // we don't put anything here
+  // Rev13: service deferred sleep from Timer1 ISR. Running sleep() here
+  // (base context) keeps the Timer1 frame off the stack while WDT and
+  // PCINT ISRs nest during the sleep loop.
+  if (pendingSleep) {
+    pendingSleep = false;
+    sleep();
+  }
 }
 
 
 // initialize the registers and synchronize with EEPROM
 void initializeRegisters() {
   i2cReg[I2C_ID] = 0x26;
-  i2cReg[I2C_FW_REVISION] = 0x0C;
+  i2cReg[I2C_FW_REVISION] = 0x0D;
 
   i2cReg[I2C_CONF_ADDRESS] = 0x08;
+
+  // Rev13: default to "any power input wakes the Pi". On first flash or
+  // after EEPROM clear, the device powers on automatically whenever main
+  // DC power is applied. Pi-side software can override via I2C reg 17.
+  i2cReg[I2C_CONF_DEFAULT_ON] = 1;
 
   i2cReg[I2C_CONF_PULSE_INTERVAL] = 4;
   i2cReg[I2C_CONF_LOW_VOLTAGE] = 255;
@@ -318,9 +359,6 @@ void initializeRegisters() {
 
   i2cReg[I2C_CONF_RTC_ENABLE_TC] = 0x01;
 
-  i2cReg[I2C_CONF_BELOW_TEMP_POINT] = 0x4b;
-  i2cReg[I2C_CONF_OVER_TEMP_POINT] = 0x50;
-
   // synchronize configuration with EEPROM
   for (byte i = 0; i < I2C_REG_COUNT; i ++) {
     byte val = EEPROM.read(i);
@@ -331,9 +369,9 @@ void initializeRegisters() {
     }
   }
 
-  // copy some EEPROM backed data to PCF85063 and LM75B
-  writeToDevice(ADDRESS_LM75B, I2C_LM75B_TOS - I2C_LM75B_TEMPERATURE, &i2cReg[I2C_CONF_OVER_TEMP_POINT], 1);
-  writeToDevice(ADDRESS_LM75B, I2C_LM75B_THYST - I2C_LM75B_TEMPERATURE, &i2cReg[I2C_CONF_BELOW_TEMP_POINT], 1);
+  // Rev13: only push RTC offset to PCF85063 at boot. LM75B threshold init
+  // removed (temperature-action feature is no-op since Rev 12, fully
+  // dropped in Rev 13).
   writeToDevice(ADDRESS_RTC, I2C_RTC_OFFSET - I2C_RTC_CTRL1, &i2cReg[I2C_CONF_RTC_OFFSET], 1);
 }
 
@@ -422,14 +460,9 @@ void sleep() {
       if (!guaranteedWake && skipPulseCount >= i2cReg[I2C_CONF_PULSE_INTERVAL]) {
         skipPulseCount = 0;
 
-        // blink white LED
-        if (i2cReg[I2C_CONF_BLINK_LED] > 0) {
-          byte ms = i2cReg[I2C_CONF_BLINK_LED];
-          ledOn();
-          delay(ms);
-          ledOff();
-        }
-
+        // Rev13: sleep-loop LED blink removed to save field battery and
+        // free flash for safety improvements. The LED still flashes on
+        // button press (PCINT1 ISR) so user interaction is unchanged.
 
         // update power mode and get input voltage
         float vin = updatePowerMode();
@@ -608,6 +641,7 @@ boolean addressEvent(uint16_t slaveAddress, uint8_t startCount) {
 
 // receives a sequence of data from i2c master (master writes to this device)
 void receiveEvent(int count) {
+  internalBusBusy = 1;  // Rev13: claim the softWireMaster bus
   if (TinyWireS.available()) {
     i2cIndex = TinyWireS.read();
     if (i2cIndex >= I2C_LM75B_TEMPERATURE && i2cIndex <= I2C_LM75B_TOS) {  // mapped to LM75B's register
@@ -646,11 +680,13 @@ void receiveEvent(int count) {
       }
     }
   }
+  internalBusBusy = 0;  // Rev13: release the softWireMaster bus
 }
 
 
 // i2c master requests data from this device (master reads from this device)
 void requestEvent() {
+  internalBusBusy = 1;  // Rev13: claim the softWireMaster bus
   switch (i2cIndex) {
     case I2C_VOLTAGE_IN_I:
       getInputVoltage();
@@ -688,6 +724,7 @@ void requestEvent() {
   } else {
     TinyWireS.write(i2cReg[i2cIndex]);  // direct i2c register
   }
+  internalBusBusy = 0;  // Rev13: release the softWireMaster bus
 }
 
 
@@ -698,6 +735,15 @@ ISR (WDT_vect) {
   if (ledUpTime == 3) {
     ledUpTime = 0;
     ledOff();
+  }
+
+  // Rev13: if the Pi is mid-transaction on the internal softWireMaster
+  // (via receiveEvent/requestEvent), skip RTC/LM75B touches this tick.
+  // Bus collisions otherwise corrupt RTC reads and produce garbage time
+  // / missed alarms (FIRMWARE_ISSUES.md #4). Cost: one missed WDT tick
+  // (~1 second), which is harmless given the 86400s alarm match window.
+  if (internalBusBusy) {
+    return;
   }
 
   // process low voltage
@@ -810,9 +856,14 @@ ISR (TIM1_OVF_vect) {
         turningOff = false;
         updateRegister(I2C_ACTION_REASON, REASON_REBOOT);
         ledOn();
-      } else {  // cut the power and enter sleep
+      } else {  // cut the power and defer sleep to loop()
         cutPower();
-        sleep();
+        // Rev13: do not call sleep() from inside this ISR. Sleep is a
+        // long-running call that nests WDT/PCINT ISRs on top of the
+        // Timer1 frame, risking SRAM exhaustion on the 512-byte ATtiny
+        // (FIRMWARE_ISSUES.md #1). Set a flag and let loop() handle it
+        // at base context, with the ISR stack already unwound.
+        pendingSleep = true;
       }
     }
   } else {
@@ -898,7 +949,12 @@ void processAlarmIfNeeded() {
   long overdue_alarm1 = cur_ts - alarm1_ts;
   long overdue_alarm2 = cur_ts - alarm2_ts;
 
-  if (canTrigger && !alarm1HasTriggered && overdue_alarm1 >= 0 && overdue_alarm1 < 4) {  // Alarm 1: startup
+  // Rev13: widened overdue window from 4s to 86400s (one day). Catches
+  // alarms missed due to WDT timing jitter or interrupted register writes
+  // that left a partial state. With Pi-side Guaranteed Wake enabled at
+  // 24h, any alarm older than 1 day will be superseded by guaranteed
+  // wake recovery, so the wider window can't fire ancient stale state.
+  if (canTrigger && !alarm1HasTriggered && overdue_alarm1 >= 0 && overdue_alarm1 < 86400) {  // Alarm 1: startup
     updateRegister(I2C_ALARM1_TRIGGERED, 1);
     updateRegister(I2C_CONF_FLAG_ALARM1, 1);
     if (!powerIsOn) {
@@ -910,7 +966,7 @@ void processAlarmIfNeeded() {
         alarm1Delayed = 1;
       }
     }
-  } else if (canTrigger && !alarm2HasTriggered && overdue_alarm2 >= 0 && overdue_alarm2 < 4) {  // Alarm 2: shutdown
+  } else if (canTrigger && !alarm2HasTriggered && overdue_alarm2 >= 0 && overdue_alarm2 < 86400) {  // Alarm 2: shutdown
     updateRegister(I2C_ALARM2_TRIGGERED, 1);
     updateRegister(I2C_CONF_FLAG_ALARM2, 1);
     if (powerIsOn && !turningOff) {

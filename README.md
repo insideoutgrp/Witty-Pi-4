@@ -1,13 +1,22 @@
 # Witty-Pi-4 (Inside Out Group fork)
 
-> Fork of [uugear/Witty-Pi-4](https://github.com/uugear/Witty-Pi-4) with custom Pi-side software (DST handling, periodic time sync, internet watchdog, custom schedules, removed GPIO-4 soft shutdown) and a patched firmware (Rev 12 with deadlock fixes, reliability improvements, button shutdown disabled). See `Software/` and `Firmware/` for details.
+> Fork of [uugear/Witty-Pi-4](https://github.com/uugear/Witty-Pi-4) for unattended field-deployed Raspberry Pi units. Two release tracks:
 >
-> | Component | Version |
-> |---|---|
-> | Pi software | see `grep SOFTWARE_VERSION Software/wittypi/utilities.sh` |
-> | Firmware | Rev 12 — see `Firmware/PROJECT_CONTEXT.md` and `Firmware/FIRMWARE_ISSUES.md` |
+> | Branch | Pi software | Firmware required | Use for |
+> |---|---|---|---|
+> | **`main`** | v4.36 | Any (Rev 7+) — firmware-agnostic | Devices already in the field on stock or older firmware. Adds DST handling, periodic time sync, internet watchdog, schedule fallbacks, guaranteed-wake backstop, atomic deploy, kernel watchdog. |
+> | **`firmware-rev13`** | v5.0 | Rev 13 (in `Firmware/WittyPi4/WittyPi4.ino` on this branch) | Devices freshly flashed with Rev 13 firmware. Adds ISR safety (sleep moved out of Timer1 ISR), I2C bus mutex, widened alarm window, "any power input wakes" default-on, strips dormant temperature/dummy-load code. |
 >
-> Deploy to a Pi with: `curl -sSL https://raw.githubusercontent.com/insideoutgrp/Witty-Pi-4/main/Software/deploy.sh | sudo bash`
+> Deploy commands:
+> ```bash
+> # Older firmware in the field:
+> curl -sSL https://raw.githubusercontent.com/insideoutgrp/Witty-Pi-4/main/Software/deploy.sh | sudo bash
+>
+> # Rev 13 firmware:
+> curl -sSL https://raw.githubusercontent.com/insideoutgrp/Witty-Pi-4/firmware-rev13/Software/deploy.sh | sudo bash
+> ```
+>
+> See `Firmware/PROJECT_CONTEXT.md` and `Firmware/FIRMWARE_ISSUES.md` for the firmware engineering history.
 
 ---
 

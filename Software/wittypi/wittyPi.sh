@@ -233,47 +233,9 @@ configure_recovery_voltage_threshold()
   fi
 }
 
-configure_over_temperature_action()
-{
-  read -p 'Choose action for over temperature (0=None, 1=Shutdown, 2=Startup): ' oa
-  if [ "$oa" == '0' ]; then
-    clear_over_temperature_action
-    sleep 2
-  elif [ "$oa" == '1' ] || [ "$oa" == '2' ]; then
-    read -p 'Input over temperature point (-30~80, value in Celsius degree): ' ot
-    if [[ $ot =~ ^-?[0-9]+$ ]] && [ $(($ot>=-30)) == '1' ] && [ $(($ot<=80)) == '1' ]; then
-      set_over_temperature_action $oa $ot
-      local action=$(over_temperature_action $oa $ot)
-      log "  Over temperature action is set: $action"
-      sleep 2
-    else
-      echo 'Please input integer between -30 and 80...'
-    fi
-  else
-    echo 'Please input 0, 1 or 2...' && sleep 2
-  fi
-}
-
-configure_below_temperature_action()
-{
-  read -p 'Choose action for below temperature (0=None, 1=Shutdown, 2=Startup): ' ba
-  if [ "$ba" == '0' ]; then
-    clear_below_temperature_action
-    sleep 2
-  elif [ "$ba" == '1' ] || [ "$ba" == '2' ]; then
-    read -p 'Input below temperature point (-30~80, value in Celsius degree): ' bt
-    if [[ $bt =~ ^-?[0-9]+$ ]] && [ $(($bt>=-30)) == '1' ] && [ $(($bt<=80)) == '1' ]; then
-      set_below_temperature_action $ba $bt
-      local action=$(below_temperature_action $ba $bt)
-      log "  Below temperature action is set: $action"
-      sleep 2
-    else
-      echo 'Please input integer between -30 and 80...'
-    fi
-  else
-    echo 'Please input 0, 1 or 2...' && sleep 2
-  fi
-}
+# (Rev13: temperature action configuration removed - feature is no-op
+# in firmware Rev 13+ since the field-deployment use case relies on
+# guaranteed wake and DEFAULT_ON for recovery, not temperature triggers.)
 
 set_default_state()
 {
@@ -323,16 +285,8 @@ set_white_led_duration()
 	fi
 }
 
-set_dummy_load_duration()
-{
-	read -p 'Input new duration for dummy load (value in milliseconds, 0~254): ' duration
-	if [ $duration -ge 0 ] && [ $duration -le 254 ]; then
-		i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_DUMMY_LOAD $duration
-		log "Dummy load duration set to $duration!" && sleep 2
-	else
-	  echo 'Please input from 0 to 254' && sleep 2
-	fi
-}
+# (Rev13: dummy-load configuration removed - feature is no-op in
+# firmware Rev 13+.)
 
 set_vin_adjustment()
 {
@@ -418,10 +372,7 @@ other_settings()
   echo -n '  [4] White LED duration'
   local led=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_BLINK_LED)
   printf ' [%d]\n' "$led"
-  echo -n '  [5] Dummy load duration'
-  local dload=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_DUMMY_LOAD)
-  printf ' [%d]\n' "$dload"
-  echo -n '  [6] Vin adjustment'
+  echo -n '  [5] Vin adjustment'
   local vinAdj=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_ADJ_VIN)
   if [[ $vinAdj -gt 127 ]]; then
   	vinAdj=$(calc $(($vinAdj-255))/100)
@@ -429,7 +380,7 @@ other_settings()
  		vinAdj=$(calc $(($vinAdj))/100)
   fi
   printf ' [%.2fV]\n' "$vinAdj"
-  echo -n '  [7] Vout adjustment'
+  echo -n '  [6] Vout adjustment'
   local voutAdj=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_ADJ_VOUT)
   if [[ $voutAdj -gt 127 ]]; then
   	voutAdj=$(calc $(($voutAdj-255))/100)
@@ -437,7 +388,7 @@ other_settings()
  		voutAdj=$(calc $(($voutAdj))/100)
   fi
   printf ' [%.2fV]\n' "$voutAdj"
-  echo -n '  [8] Iout adjustment'
+  echo -n '  [7] Iout adjustment'
   local ioutAdj=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_ADJ_IOUT)
   if [[ $ioutAdj -gt 127 ]]; then
   	ioutAdj=$(calc $(($ioutAdj-255))/100)
@@ -445,13 +396,13 @@ other_settings()
  		ioutAdj=$(calc $(($ioutAdj))/100)
   fi
   printf ' [%.2fA]\n' "$ioutAdj"
-  local optionCount=8;
+  local optionCount=7;
   if [ $(($firmwareRev)) -ge 2 ]; then
-    echo -n '  [9] Default ON delay'
+    echo -n '  [8] Default ON delay'
     local dod=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_DEFAULT_ON_DELAY)
     dod=$(hex2dec $dod)
     echo " [$dod Seconds]"
-    optionCount=9;
+    optionCount=8;
   fi
   read -p "Which parameter to set? (1~$optionCount) " action
   case $action in
@@ -459,11 +410,10 @@ other_settings()
       [2]* ) set_power_cut_delay;;
       [3]* ) set_pulsing_interval;;
       [4]* ) set_white_led_duration;;
-      [5]* ) set_dummy_load_duration;;
-      [6]* ) set_vin_adjustment;;
-      [7]* ) set_vout_adjustment;;
-      [8]* ) set_iout_adjustment;;
-      [9]* ) set_default_on_delay;;
+      [5]* ) set_vin_adjustment;;
+      [6]* ) set_vout_adjustment;;
+      [7]* ) set_iout_adjustment;;
+      [8]* ) set_default_on_delay;;
       * ) echo "Please choose from 1 to $optionCount";;
   esac
 }
@@ -507,20 +457,6 @@ reset_recovery_voltage_threshold()
   log ' done :-)'
 }
 
-reset_over_temperature_action()
-{
-  log '  Clearing over temperature action...' '-n'
-  clear_over_temperature_action
-  log ' done :-)'
-}
-
-reset_below_temperature_action()
-{
-  log '  Clearing below temperature action...' '-n'
-  clear_below_temperature_action
-  log ' done :-)'
-}
-
 reset_all()
 {
   reset_startup_time
@@ -528,8 +464,6 @@ reset_all()
   delete_schedule_script
   reset_low_voltage_threshold
   reset_recovery_voltage_threshold
-  reset_over_temperature_action
-  reset_below_temperature_action
 }
 
 reset_data()
@@ -544,20 +478,16 @@ reset_data()
   else
     echo '  [5] Clear recovery voltage threshold'
   fi
-  echo '  [6] Clear over temperature action'
-  echo '  [7] Clear below temperature action'
-  echo '  [8] Perform all actions above'
-  read -p "Which action to perform? (1~8) " action
+  echo '  [6] Perform all actions above'
+  read -p "Which action to perform? (1~6) " action
   case $action in
       [1]* ) reset_startup_time;;
       [2]* ) reset_shutdown_time;;
       [3]* ) delete_schedule_script;;
       [4]* ) reset_low_voltage_threshold;;
       [5]* ) reset_recovery_voltage_threshold;;
-      [6]* ) clear_over_temperature_action;;
-      [7]* ) clear_below_temperature_action;;
-      [8]* ) reset_all;;
-      * ) echo 'Please choose from 1 to 8';;
+      [6]* ) reset_all;;
+      * ) echo 'Please choose from 1 to 6';;
   esac
 }
 
@@ -651,24 +581,10 @@ while true; do
       echo "  [$recVolt]";
     fi
   fi
-  echo -n '  9. Set over temperature action'
-  ota=$(over_temperature_action)
-  if [ "$ota" != '' ]; then
-    echo "  [$ota]"
-  else
-    echo
-  fi
-  echo -n ' 10. Set below temperature action'
-  bta=$(below_temperature_action)
-  if [ "$bta" != '' ]; then
-    echo "  [$bta]"
-  else
-    echo
-  fi
-  echo ' 11. View/change other settings...'
-  echo ' 12. Reset data...'
-  echo ' 13. Exit'
-  read -p 'What do you want to do? (1~13) ' action
+  echo '  9. View/change other settings...'
+  echo ' 10. Reset data...'
+  echo ' 11. Exit'
+  read -p 'What do you want to do? (1~11) ' action
   case $action in
       1 ) system_to_rtc;;
       2 ) rtc_to_system;;
@@ -678,12 +594,10 @@ while true; do
       6 ) choose_schedule_script;;
       7 ) configure_low_voltage_threshold;;
       8 ) configure_recovery_voltage_threshold;;
-      9 ) configure_over_temperature_action;;
-     10 ) configure_below_temperature_action;;
-     11 ) other_settings;;
-     12 ) reset_data;;
-     13 ) exit;;
-      * ) echo 'Please choose from 1 to 13';;
+      9 ) other_settings;;
+     10 ) reset_data;;
+     11 ) exit;;
+      * ) echo 'Please choose from 1 to 11';;
   esac
   echo ''
   echo '================================================================================'

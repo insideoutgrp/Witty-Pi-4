@@ -14,15 +14,35 @@ if [ "$(id -u)" != 0 ]; then
 fi
 
 REPO_URL="https://github.com/insideoutgrp/Witty-Pi-4"
-BRANCH="main"
+BRANCH="firmware-rev13"
+MIN_FW_REVISION=13   # firmware Rev 13 required for v5.0+ Pi software
 TMP_DIR=$(mktemp -d)
 
 echo '================================================================================'
 echo '|                                                                              |'
-echo '|          Witty Pi 4 DST Fix (v4.24) - Remote Deploy                          |'
+echo '|          Witty Pi 4 v5.0 (Rev13 firmware) - Remote Deploy                    |'
 echo '|                                                                              |'
 echo '================================================================================'
 echo ''
+echo 'This branch requires firmware Revision 13 or later. Devices still on'
+echo 'older firmware must use the "main" branch instead.'
+echo ''
+
+# Pre-flight firmware version check
+if command -v i2cget >/dev/null 2>&1; then
+  fw_hex=$(i2cget -y 1 0x08 12 2>/dev/null || echo "")
+  if [ -n "$fw_hex" ]; then
+    fw_rev=$((fw_hex))
+    if [ "$fw_rev" -lt "$MIN_FW_REVISION" ]; then
+      echo "ERROR: detected firmware Rev ${fw_rev} - this branch requires Rev ${MIN_FW_REVISION}+."
+      echo "       Use the main branch instead:"
+      echo "         curl -sSL https://raw.githubusercontent.com/insideoutgrp/Witty-Pi-4/main/Software/deploy.sh | sudo bash"
+      exit 1
+    fi
+    echo ">>> Firmware Rev ${fw_rev} detected - OK."
+    echo ''
+  fi
+fi
 
 # detect existing installation
 WITTYPI_DIR=""

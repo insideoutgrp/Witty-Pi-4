@@ -122,7 +122,7 @@ if [ -z ${I2C_MC_ADDRESS+x} ]; then
 
   TIME_UNKNOWN=0
 
-  SOFTWARE_VERSION='4.36'
+  SOFTWARE_VERSION='5.00'
 
   readonly LOCAL_TZ='Europe/London'
 fi
@@ -460,6 +460,17 @@ enable_ignore_lv_shutdown()
   log "Ignore LV shutdown flag set (reg42=$readback)."
 }
 
+enable_default_on()
+{
+  # "Any power input wakes" - sets DEFAULT_ON=1 so the Pi powers up
+  # automatically whenever main DC power is connected, without requiring
+  # a button press. Combined with USB-5V auto-on (L3V7 variant) and
+  # guaranteed wake, this means any power source will start the system.
+  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_DEFAULT_ON 1
+  local readback=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_DEFAULT_ON)
+  log "Default-ON enabled (reg17=$readback)."
+}
+
 verify_alarm_in_future()
 {
   # Reads back an alarm register block and confirms the encoded time is in
@@ -749,99 +760,8 @@ clear_recovery_voltage_threshold()
   i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_RECOVERY_VOLTAGE 0xFF
 }
 
-get_over_temperature_action()
-{
-  hex2dec $(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_OVER_TEMP_ACTION)
-}
-
-get_over_temperature_point()
-{
-  local t=$(hex2dec $(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_LM75B_TOS))
-  if [ $(($t>127)) == '1' ]; then
-    t=$(($t-256))
-  fi
-  printf "%d" $t
-}
-
-get_below_temperature_action()
-{
-  hex2dec $(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_BELOW_TEMP_ACTION)
-}
-
-get_below_temperature_point()
-{
-  local t=$(hex2dec $(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_LM75B_THYST))
-  if [ $(($t>127)) == '1' ]; then
-    t=$(($t-256))
-  fi
-  printf "%d" $t
-}
-
-over_temperature_action()
-{
-  if [ $# -eq 0 ]; then
-    over_temperature_action $(get_over_temperature_action) $(get_over_temperature_point)
-  else
-    local action='None'
-    if [ "$1" == '1' ]; then
-      action='Shutdown'
-    elif [ "$1" == '2' ]; then
-      action='Startup'
-    fi
-    if [ "$action" != 'None' ]; then
-      echo -n "T>$2$(echo $'\xc2\xb0'C) $(echo -e '\u2794') $action"
-    fi
-  fi
-}
-
-below_temperature_action()
-{
-  if [ $# -eq 0 ]; then
-    below_temperature_action $(get_below_temperature_action) $(get_below_temperature_point)
-  else
-    local action='None'
-    if [ "$1" == '1' ]; then
-      action='Shutdown'
-    elif [ "$1" == '2' ]; then
-      action='Startup'
-    fi
-    if [ "$action" != 'None' ]; then
-      echo -n "T<$2$(echo $'\xc2\xb0'C) $(echo -e '\u2794') $action"
-    fi
-  fi
-}
-
-set_over_temperature_action()
-{
-  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_OVER_TEMP_ACTION $1
-  local t=$2
-  if [ $(($2<0)) == '1' ]; then
-    t=$(($2+256))
-  fi
-  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_LM75B_TOS $t
-  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_OVER_TEMP_POINT $t
-}
-
-set_below_temperature_action()
-{
-  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_BELOW_TEMP_ACTION $1
-  local t=$2
-  if [ $(($2<0)) == '1' ]; then
-    t=$(($2+256))
-  fi
-  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_LM75B_THYST $t
-  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_BELOW_TEMP_POINT $t
-}
-
-clear_over_temperature_action()
-{
-  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_OVER_TEMP_ACTION 0x00
-}
-
-clear_below_temperature_action()
-{
-  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_BELOW_TEMP_ACTION 0x00
-}
+# (Rev13: temperature-action helpers removed - feature is no-op in firmware
+# Rev 13+. Temperature is still readable via get_temperature() for display.)
 
 check_sys_and_rtc_time()
 {

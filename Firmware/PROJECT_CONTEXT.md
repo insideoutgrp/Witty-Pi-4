@@ -22,7 +22,7 @@ Modify the WittyPi 4 firmware (`WittyPi4.ino`) for an unattended field-deployed 
 
 | File | Purpose |
 |------|---------|
-| `Firmware/WittyPi4/WittyPi4.ino` | **Current firmware (Rev 12)** — canonical, imported into this repo |
+| `Firmware/WittyPi4/WittyPi4.ino` | **Current firmware (Rev 13)** — canonical, imported into this repo |
 | `Firmware/FIRMWARE_ISSUES.md` | Initial issue review document (Rev 7 audit + Rev 10 fixes) |
 | `Firmware/WittyPi4_UserManual.pdf` | Official UUGear user manual |
 
@@ -48,6 +48,30 @@ The firmware uses `emulateButtonClick()` to drive PIN_BUTTON LOW, which:
 For scheduled events (alarm2, low voltage, temperature), the firmware ALSO directly sets `turningOff=true` and starts the Timer1 countdown — so power gets cut after the configured delay (default 7 seconds) regardless of whether the Pi gracefully shuts down or not.
 
 ## Revision History
+
+### Rev 13 (2026-05-26) — Field reliability + "any power input wakes"
+Following the four-agent reliability audit (see commit history on the
+`firmware-rev13` branch). Targets field-deployed devices with no
+physical access.
+- **Reliability:** moved `sleep()` out of Timer1 ISR — set `pendingSleep`
+  flag from ISR, run sleep from `loop()`. Eliminates the stack-nesting
+  risk on 512-byte SRAM (FIRMWARE_ISSUES.md #1).
+- **Reliability:** added `internalBusBusy` mutex guarding `softWireMaster`
+  between WDT ISR and Pi-side I²C transactions. Skips one WDT tick
+  rather than corrupting an in-flight bus transfer (FIRMWARE_ISSUES.md #4).
+- **Reliability:** widened the `overdue_alarm` window in
+  `processAlarmIfNeeded()` from 4s to 86400s (1 day). Catches alarms
+  missed due to WDT jitter or interrupted writes. Safe because Pi-side
+  Guaranteed-Wake (reg 49 = 24h) supersedes anything older.
+- **"Any power input wakes":** default `I2C_CONF_DEFAULT_ON = 1` so the Pi
+  powers on whenever main DC is applied (no button press required).
+  Pi-side daemon also writes this on every boot.
+- **Stripped dormant code for flash headroom:**
+  - Temperature shutdown/startup — registers 43–46 reserved (no-op).
+    LM75B no longer initialised at boot.
+  - Sleep-loop LED blink — saves field-deployment battery.
+  - Net flash saved offsets the reliability additions.
+- **Bumped `I2C_FW_REVISION` to 0x0D.**
 
 ### Rev 7 (original from GitHub)
 Source: https://raw.githubusercontent.com/uugear/Witty-Pi-4/main/Firmware/WittyPi4/WittyPi4.ino

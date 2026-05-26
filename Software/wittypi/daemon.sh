@@ -91,10 +91,9 @@ if [ $has_mc == 1 ] ; then
   firmwareRev=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_FW_REVISION)
   log "Firmware Revison: $firmwareRev"
 
-  # === Reliability backstops (v4.36+) ===
-  # These are written every boot so a fresh device or one with corrupted
-  # EEPROM gets the failsafes re-enabled. Safe on all firmware revisions:
-  # unsupported registers either no-op or store harmlessly in EEPROM.
+  # === Reliability backstops (v5.0+, requires firmware Rev 13) ===
+  # Written every boot so a fresh device or one with corrupted EEPROM gets
+  # the failsafes re-enabled.
 
   # Guaranteed Wake: force the firmware to wake the Pi at least once every
   # 24 hours regardless of alarm/RTC/LV state. Primary recovery mechanism.
@@ -103,6 +102,18 @@ if [ $has_mc == 1 ] ; then
   # Ignore stale LV_SHUTDOWN flag so a previous brownout doesn't gate
   # future scheduled wakes.
   enable_ignore_lv_shutdown
+
+  # "Any power input wakes" - power on the Pi automatically whenever main
+  # power is applied. With this set, the Pi never needs a manual button
+  # press to come up after a power event.
+  enable_default_on
+
+  # On the L3V7 variant, also auto-on when USB 5V is connected.
+  # Setting recovery_voltage = 1 enables the USB-5V auto-on behaviour.
+  if [ $(($firmwareID)) -eq 55 ]; then
+    i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_RECOVERY_VOLTAGE 1
+    log 'L3V7: Auto-On when USB 5V connected enabled.'
+  fi
 
   # print out current voltages and current
   vout=$(get_output_voltage)
@@ -114,13 +125,8 @@ if [ $has_mc == 1 ] ; then
     log "Current Vin=${vin}V, Vout=${vout}V, Iout=${iout}A"
   fi
 
-  # if temperature sensor thresholds are not set, set them now
-  btp=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_BELOW_TEMP_POINT)
-  otp=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_OVER_TEMP_POINT)
-  if [ $btp == '0x00' ] && [ $otp == '0x00' ]; then
-    i2cset -y 0x01 $I2C_MC_ADDRESS $I2C_LM75B_THYST 0x004b w
-    i2cset -y 0x01 $I2C_MC_ADDRESS $I2C_LM75B_TOS 0x0050 w
-  fi
+  # (Rev 13: removed LM75B temperature-action initialisation - the feature
+  # is no-op in firmware Rev 13+ and the registers are reserved.)
 fi
 
 # check and clear alarm flags
@@ -143,12 +149,6 @@ if [ $has_mc == 1 ] ; then
     log 'System starts up because the button is clicked.'
   elif [ "$reason" == $REASON_VOLTAGE_RESTORE ]; then
     log 'System starts up because the input voltage reaches the restore voltage.'
-  elif [ "$reason" == $REASON_OVER_TEMPERATURE ]; then
-    log 'System starts up because temperature is higher than preset value.'
-    log "$(get_temperature)"
-  elif [ "$reason" == $REASON_BELOW_TEMPERATURE ]; then
-    log 'System starts up because temperature is lower than preset value.'
-    log "$(get_temperature)"
   elif [ "$reason" == $REASON_ALARM1_DELAYED ]; then
     log 'System starts up because of the scheduled startup got delayed.'
     log 'Maybe the scheduled startup was due when Pi was running, or Pi had been shut down but TXD stayed HIGH to prevent the power cut.'
