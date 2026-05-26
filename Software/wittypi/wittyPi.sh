@@ -237,15 +237,9 @@ configure_recovery_voltage_threshold()
 # in firmware Rev 13+ since the field-deployment use case relies on
 # guaranteed wake and DEFAULT_ON for recovery, not temperature triggers.)
 
-set_default_state()
-{
-  read -p 'Input new default state (1 or 0: 1=ON, 0=OFF): ' state
-  case $state in
-    0) i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_DEFAULT_ON 0x00 && log 'Set to "Default OFF"!' && sleep 2;;
-    1) i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_DEFAULT_ON 0x01 && log 'Set to "Default ON"!' && sleep 2;;
-    *) echo 'Please input 1 or 0 ...' && sleep 2;;
-  esac
-}
+# (Rev13: set_default_state() removed - firmware now forces DEFAULT_ON=1
+# on every boot as field-deployment policy. The setting cannot be
+# disabled to ensure devices always wake on power applied.)
 
 set_power_cut_delay()
 {
@@ -354,25 +348,21 @@ set_default_on_delay()
 other_settings()
 {
   echo 'Here you can set:'
-  echo -n '  [1] Default state when powered'
-  local ds=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_DEFAULT_ON)
-  if [[ $ds -eq 0 ]]; then
-    echo ' [default OFF]'
-	else
-    echo ' [default ON]'
-  fi
-  echo -n '  [2] Power cut delay after shutdown'
+  # Note: Rev13 firmware enforces DEFAULT_ON=1 on every boot - it cannot
+  # be disabled. This is intentional field-deployment policy ("any power
+  # input wakes"). The menu option has been removed accordingly.
+  echo -n '  [1] Power cut delay after shutdown'
   local pcd=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_POWER_CUT_DELAY)
   pcd=$(calc $(($pcd))/10)
   printf ' [%.1f Seconds]\n' "$pcd"
-  echo -n '  [3] Pulsing interval during sleep'
+  echo -n '  [2] Pulsing interval during sleep'
   local pi=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_PULSE_INTERVAL)
   pi=$(hex2dec $pi)
   echo " [$pi Seconds]"
-  echo -n '  [4] White LED duration'
+  echo -n '  [3] White LED duration'
   local led=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_BLINK_LED)
   printf ' [%d]\n' "$led"
-  echo -n '  [5] Vin adjustment'
+  echo -n '  [4] Vin adjustment'
   local vinAdj=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_ADJ_VIN)
   if [[ $vinAdj -gt 127 ]]; then
   	vinAdj=$(calc $(($vinAdj-255))/100)
@@ -380,7 +370,7 @@ other_settings()
  		vinAdj=$(calc $(($vinAdj))/100)
   fi
   printf ' [%.2fV]\n' "$vinAdj"
-  echo -n '  [6] Vout adjustment'
+  echo -n '  [5] Vout adjustment'
   local voutAdj=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_ADJ_VOUT)
   if [[ $voutAdj -gt 127 ]]; then
   	voutAdj=$(calc $(($voutAdj-255))/100)
@@ -388,7 +378,7 @@ other_settings()
  		voutAdj=$(calc $(($voutAdj))/100)
   fi
   printf ' [%.2fV]\n' "$voutAdj"
-  echo -n '  [7] Iout adjustment'
+  echo -n '  [6] Iout adjustment'
   local ioutAdj=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_ADJ_IOUT)
   if [[ $ioutAdj -gt 127 ]]; then
   	ioutAdj=$(calc $(($ioutAdj-255))/100)
@@ -396,24 +386,23 @@ other_settings()
  		ioutAdj=$(calc $(($ioutAdj))/100)
   fi
   printf ' [%.2fA]\n' "$ioutAdj"
-  local optionCount=7;
+  local optionCount=6;
   if [ $(($firmwareRev)) -ge 2 ]; then
-    echo -n '  [8] Default ON delay'
+    echo -n '  [7] Default ON delay'
     local dod=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_DEFAULT_ON_DELAY)
     dod=$(hex2dec $dod)
     echo " [$dod Seconds]"
-    optionCount=8;
+    optionCount=7;
   fi
   read -p "Which parameter to set? (1~$optionCount) " action
   case $action in
-      [1]* ) set_default_state;;
-      [2]* ) set_power_cut_delay;;
-      [3]* ) set_pulsing_interval;;
-      [4]* ) set_white_led_duration;;
-      [5]* ) set_vin_adjustment;;
-      [6]* ) set_vout_adjustment;;
-      [7]* ) set_iout_adjustment;;
-      [8]* ) set_default_on_delay;;
+      [1]* ) set_power_cut_delay;;
+      [2]* ) set_pulsing_interval;;
+      [3]* ) set_white_led_duration;;
+      [4]* ) set_vin_adjustment;;
+      [5]* ) set_vout_adjustment;;
+      [6]* ) set_iout_adjustment;;
+      [7]* ) set_default_on_delay;;
       * ) echo "Please choose from 1 to $optionCount";;
   esac
 }

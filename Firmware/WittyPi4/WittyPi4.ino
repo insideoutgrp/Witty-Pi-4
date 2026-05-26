@@ -15,9 +15,13 @@
  *     - Reliability: widened overdue window in processAlarmIfNeeded
  *       from 4s to 86400s (1 day). Catches alarms missed due to
  *       WDT jitter or stale-state interruptions.
- *     - "Any power input wakes": default I2C_CONF_DEFAULT_ON = 1
- *       so the Pi powers on whenever main DC power is connected
- *       (rather than requiring a button press).
+ *     - "Any power input wakes": I2C_CONF_DEFAULT_ON is enforced to
+ *       1 every boot (after EEPROM sync), so the Pi powers on
+ *       whenever main DC power is connected. Cannot be disabled
+ *       via EEPROM persistence — field policy.
+ *     - Default I2C_CONF_RECOVERY_VOLTAGE = 30 (3.0V) so even a
+ *       fresh unit recovers from LV-shutdown on any reasonable
+ *       DC input, without depending on the Pi daemon having run.
  *     - Removed dormant features for flash headroom:
  *       * Temperature-action shutdown/startup (registers 43-46
  *         retained as no-op for backwards compat — LM75B no
@@ -352,7 +356,10 @@ void initializeRegisters() {
   i2cReg[I2C_CONF_LOW_VOLTAGE] = 255;
   i2cReg[I2C_CONF_BLINK_LED] = 100;
   i2cReg[I2C_CONF_POWER_CUT_DELAY] = 70;
-  i2cReg[I2C_CONF_RECOVERY_VOLTAGE] = 255;
+  // Rev13: default recovery voltage 3.0V so even a brand-new unit (where
+  // the Pi daemon has never run to push its own settings) wakes from
+  // LV-shutdown when any reasonable DC input is restored.
+  i2cReg[I2C_CONF_RECOVERY_VOLTAGE] = 30;
 
   i2cReg[I2C_CONF_ADJ_VIN] = 20;
   i2cReg[I2C_CONF_ADJ_VOUT] = 20;
@@ -368,6 +375,15 @@ void initializeRegisters() {
       i2cReg[i] = val;
     }
   }
+
+  // Rev13: enforce "any power input wakes" — DEFAULT_ON is reset to 1
+  // AFTER the EEPROM sync loop, overriding any value persisted from a
+  // previous wittyPi.sh menu change. Field-deployed devices must never
+  // be left with DEFAULT_ON=0 because the Pi daemon's enable_default_on
+  // can only run after the Pi has already powered up. This is a one-way
+  // policy: the device will auto-wake on power applied, period.
+  i2cReg[I2C_CONF_DEFAULT_ON] = 1;
+  EEPROM.update(I2C_CONF_DEFAULT_ON, 1);
 
   // Rev13: only push RTC offset to PCF85063 at boot. LM75B threshold init
   // removed (temperature-action feature is no-op since Rev 12, fully
