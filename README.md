@@ -1,4 +1,15 @@
-# Witty-Pi-4
+# Witty-Pi-4 (Inside Out Group fork)
+
+> Fork of [uugear/Witty-Pi-4](https://github.com/uugear/Witty-Pi-4) with custom Pi-side software (DST handling, periodic time sync, internet watchdog, custom schedules, removed GPIO-4 soft shutdown) and a patched firmware (Rev 12 with deadlock fixes, reliability improvements, button shutdown disabled). See `Software/` and `Firmware/` for details.
+>
+> | Component | Version |
+> |---|---|
+> | Pi software | see `grep SOFTWARE_VERSION Software/wittypi/utilities.sh` |
+> | Firmware | Rev 12 — see `Firmware/PROJECT_CONTEXT.md` and `Firmware/FIRMWARE_ISSUES.md` |
+>
+> Deploy to a Pi with: `curl -sSL https://raw.githubusercontent.com/insideoutgrp/Witty-Pi-4/main/Software/deploy.sh | sudo bash`
+
+---
 
 Witty Pi is an add-on board that adds realtime clock and power management to your Raspberry Pi. It can define your Raspberry Pi’s ON/OFF sequence, and significantly reduce the energy usage. Witty Pi 4 is the fourth generation of Witty Pi and it has these hardware resources onboard:
 

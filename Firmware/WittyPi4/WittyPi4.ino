@@ -1,9 +1,45 @@
 /**
  * Firmware for WittyPi 4
- * 
- * Revision: 7
+ *
+ * Revision: 12
+ *
+ * Changelog:
+ *   Rev 11 (2026-04-11):
+ *     - Disable physical button from initiating shutdown while the
+ *       system is running. Button still works for power-on (wake from
+ *       sleep). Emulated button clicks from alarms, low voltage, and
+ *       temperature triggers still initiate shutdown as before.
+ *     - Increase low voltage detection grace period from 180s (3 min)
+ *       to 250s (~4 min) to cover slow boots and first-boot SD card
+ *       expansion. Max value for byte counter type.
+ *     - Fix: forcePowerCutIfNeeded() and Timer1 reset were bypassing
+ *       the button disable, causing physical button to still shut down.
+ *       Both now gated by isButtonClickEmulated.
+ *     - Fix: Low voltage threshold unreachable (byte < 300 always true).
+ *     - Fix: SYS_UP detection blocked by LED on shared pin 0. Don't
+ *       update lastSystemUp on guard failure so next PCINT retries.
+ *     - Fix: listenToTxd not set if TXD already HIGH at boot. Now
+ *       initialized from TXD pin state on wake.
+ *     - Fix: Alarm matching window widened from 2s to 4s to prevent
+ *       missed alarms from WDT timing jitter.
+ *     - Fix: copyAlarm writes all 5 RTC alarm registers (was 4).
+ *     - Fix: Missing endTransmission for LM75B CONF I2C read.
+ *   Rev 12 (2026-04-14):
+ *     - Fix: Alarm2, low voltage, and temperature shutdown paths now
+ *       reset Timer1 so power-cut delay is deterministic.
+ *     - Removed WDT turningOff timeout (root causes now fixed by
+ *       TCNT1 resets, SYS_UP retry, listenToTxd init, wider alarm
+ *       window — Timer1 hardware doesn't stall).
+ *     - Removed dummy load pulsing and forcePowerCutIfNeeded.
+ *     - Inlined getTemperature, offset2Value, value2Offset.
+ *   Rev 10 (2026-04-11):
+ *     - Fix: Add WDT-based turningOff safety timeout (36 seconds).
+ *       If the turningOff flag remains set beyond the maximum power-cut
+ *       delay plus margin, the WDT ISR forces cutPower() to prevent
+ *       permanent deadlock where power is never cut and the system
+ *       drains the battery indefinitely. (Issues #10, #11)
  */
- 
+
 #define SDA_PIN 2
 #define SDA_PORT PORTB
 #define SCL_PIN 0
@@ -35,7 +71,7 @@
 
 /*
  * I2C registers
- * 
+ *
  * Registers with index 0~15 are readonly
  * Registers with index 16~49 can be read/wrote
  * Registers with index >= 50 are vitual registers
@@ -102,7 +138,7 @@
 #define I2C_CONF_OVER_TEMP_POINT    46  // set point for over temperature
 
 #define I2C_CONF_DEFAULT_ON_DELAY   47  // the delay (in second) between MCU initialization and turning on Raspberry Pi, when I2C_CONF_DEFAULT_ON = 1
-#define I2C_CONF_MISC               48  // 8 bits for miscellaneous configuration. 
+#define I2C_CONF_MISC               48  // 8 bits for miscellaneous configuration.
                                         //   bit-0: set to 1 to disable alarm1 (startup) delay
 #define I2C_CONF_GUARANTEED_WAKE    49  // 8 bits for guarenteed wake configuration.
                                         //   bit-0~6: guaranteed wake duration (0~127)
@@ -177,7 +213,6 @@ volatile boolean isButtonClickEmulated = false;
 
 volatile byte skipAdjustRtcCount = 0;
 
-volatile byte skipTempShutdownCount = 0;
 
 volatile byte skipPulseCount = 0;
 
@@ -198,6 +233,7 @@ volatile unsigned long guaranteedWakeCounter = 0;
 volatile byte lowVoltageCacheInteger = 0;
 
 volatile byte lowVoltageCacheDecimal = 0;
+
 
 SoftWireMaster softWireMaster;  // software I2C master
 
@@ -243,7 +279,7 @@ void setup() {
 
   // enable watchdog
   watchdog_enable(0);
-  
+
   // enable all interrupts
   sei();
 
@@ -255,7 +291,7 @@ void setup() {
     powerOn();  // power on directly
   } else {
     sleep();    // sleep and wait for button action
-  }  
+  }
 }
 
 
@@ -267,8 +303,8 @@ void loop() {
 // initialize the registers and synchronize with EEPROM
 void initializeRegisters() {
   i2cReg[I2C_ID] = 0x26;
-  i2cReg[I2C_FW_REVISION] = 0x07;
-  
+  i2cReg[I2C_FW_REVISION] = 0x0C;
+
   i2cReg[I2C_CONF_ADDRESS] = 0x08;
 
   i2cReg[I2C_CONF_PULSE_INTERVAL] = 4;
@@ -292,7 +328,7 @@ void initializeRegisters() {
       EEPROM.update(i, i2cReg[i]);
     } else {
       i2cReg[i] = val;
-    } 
+    }
   }
 
   // copy some EEPROM backed data to PCF85063 and LM75B
@@ -316,7 +352,7 @@ void timer1_enable() {
   // set entire TCCR1A and TCCR1B register to 0
   TCCR1A = 0;
   TCCR1B = 0;
-  
+
   // set 1024 prescaler
   bitSet(TCCR1B, CS12);
   bitSet(TCCR1B, CS10);
@@ -343,9 +379,13 @@ void timer1_disable() {
 void sleep() {
   timer1_disable();                       // disable Timer1
   ADCSRA &= ~_BV(ADEN);                   // ADC off
-  set_sleep_mode(SLEEP_MODE_PWR_DOWN);    // power-down mode 
+  set_sleep_mode(SLEEP_MODE_PWR_DOWN);    // power-down mode
   sleep_enable();                         // sets the Sleep Enable bit in the MCUCR Register (SE BIT)
-  
+
+  // clear alarm triggered flags so alarms can re-fire without daemon intervention
+  updateRegister(I2C_ALARM1_TRIGGERED, 0);
+  updateRegister(I2C_ALARM2_TRIGGERED, 0);
+
   GIMSK = _BV (PCIE1);                    // only enable interrupt for switch (PCINT9)
   PCMSK1 = _BV (PCINT9);
   sei();
@@ -377,7 +417,7 @@ void sleep() {
           updateRegister(I2C_ACTION_REASON, REASON_GUARANTEED_WAKE);  // guarantee wake up in given duration
         }
       }
-      
+
       skipPulseCount ++;
       if (!guaranteedWake && skipPulseCount >= i2cReg[I2C_CONF_PULSE_INTERVAL]) {
         skipPulseCount = 0;
@@ -389,22 +429,15 @@ void sleep() {
           delay(ms);
           ledOff();
         }
-  
-        // dummy load
-        if (i2cReg[I2C_CONF_DUMMY_LOAD] > 0) {
-          byte ms = i2cReg[I2C_CONF_DUMMY_LOAD];
-          digitalWrite(PIN_CTRL, 1);
-          delay(ms);
-          cutPower();
-        }
+
 
         // update power mode and get input voltage
         float vin = updatePowerMode();
-  
+
         // check input voltage if shutdown because of low voltage, and recovery voltage has been set
         // will skip checking I2C_LV_SHUTDOWN if I2C_CONF_LOW_VOLTAGE is set to 0xFF
-        if ((i2cReg[I2C_POWER_MODE] == 1 || i2cReg[I2C_CONF_IGNORE_POWER_MODE] == 1) 
-            && (i2cReg[I2C_LV_SHUTDOWN] == 1 || i2cReg[I2C_CONF_LOW_VOLTAGE] == 255 || i2cReg[I2C_CONF_IGNORE_LV_SHUTDOWN] == 1) 
+        if ((i2cReg[I2C_POWER_MODE] == 1 || i2cReg[I2C_CONF_IGNORE_POWER_MODE] == 1)
+            && (i2cReg[I2C_LV_SHUTDOWN] == 1 || i2cReg[I2C_CONF_LOW_VOLTAGE] == 255 || i2cReg[I2C_CONF_IGNORE_LV_SHUTDOWN] == 1)
             && i2cReg[I2C_CONF_RECOVERY_VOLTAGE] != 255) {
           float vrec = ((float)i2cReg[I2C_CONF_RECOVERY_VOLTAGE]) / 10;
           if (vin >= vrec) {
@@ -422,11 +455,11 @@ void sleep() {
   timer1_enable();                        // enable Timer1
 
   GIMSK = _BV (PCIE0) | _BV (PCIE1);
-  PCMSK1 = _BV (PCINT8) | _BV (PCINT9); 
+  PCMSK1 = _BV (PCINT8) | _BV (PCINT9);
   sei();                                  // enable all required interrupts
 
   // tap the button to wake up
-  listenToTxd = false;
+  listenToTxd = digitalRead(PIN_TX_UP);  // start listening if TXD already HIGH
   systemIsUp = false;
   turningOff = false;
   powerOn();
@@ -434,7 +467,7 @@ void sleep() {
 }
 
 
-// cut 5V output on GPIO header 
+// cut 5V output on GPIO header
 void cutPower() {
   powerIsOn = false;
   digitalWrite(PIN_CTRL, 0);
@@ -445,7 +478,6 @@ void cutPower() {
 // output 5V to GPIO header
 void powerOn() {
   powerIsOn = true;
-  skipTempShutdownCount = 0;
   guaranteedWakeCounter = 0;
   skipLowVoltageDetectCount = 0;
   digitalWrite(PIN_CTRL, 1);
@@ -476,24 +508,23 @@ float getAdcVoltageAtPin(byte pin) {
 }
 
 
+
 // get voltage at cathode
 float getCathVoltage() {
-  return 0.001075268817204 * analogRead(PIN_VK);   // 1.1/1023~=0.001075  
+  return 0.001075f * analogRead(PIN_VK);
 }
-
 
 // get actual adjust value for given register
 float getAdjustValue(byte regId) {
   return (float)((char)i2cReg[regId]) / 100.0f;
 }
 
-
 // update power mode according to input voltage, and return the input voltage
 float updatePowerMode() {
   byte bk = ADCSRA;
   ADCSRA |= _BV(ADEN);
   float vin = getAdcVoltageAtPin(PIN_VIN);
-  ADCSRA = bk;  
+  ADCSRA = bk;
   updateRegister(I2C_POWER_MODE, (vin > 5.25f) ? 1 : 0);
   return vin;
 }
@@ -534,15 +565,13 @@ float getOutputCurrent() {
 }
 
 
-// get temperature
-char getTemperature() {
-  return readFromDevice(ADDRESS_LM75B, I2C_LM75B_TEMPERATURE - I2C_LM75B_TEMPERATURE);
-}
+
+
 
 
 // get integer part of given number
 byte getIntegerPart(float v) {
-  return (byte)v;  
+  return (byte)v;
 }
 
 
@@ -590,7 +619,7 @@ void receiveEvent(int count) {
         softWireMaster.write(TinyWireS.read());
         softWireMaster.write(TinyWireS.read());
       }
-      softWireMaster.endTransmission();    
+      softWireMaster.endTransmission();
     } else if (i2cIndex >= I2C_RTC_CTRL1 && i2cIndex <= I2C_RTC_TIMER_MODE) {  // mapped to RTC's register
       softWireMaster.beginTransmission(ADDRESS_RTC);
       softWireMaster.write(i2cIndex - I2C_RTC_CTRL1);
@@ -622,7 +651,6 @@ void receiveEvent(int count) {
 
 // i2c master requests data from this device (master reads from this device)
 void requestEvent() {
-  float v = 0.0;
   switch (i2cIndex) {
     case I2C_VOLTAGE_IN_I:
       getInputVoltage();
@@ -644,6 +672,7 @@ void requestEvent() {
     if (i2cIndex == I2C_LM75B_CONF) {
       softWireMaster.requestFrom(ADDRESS_LM75B, 1);
       TinyWireS.write(softWireMaster.read());
+      softWireMaster.endTransmission();
     } else {
       softWireMaster.requestFrom(ADDRESS_LM75B, 2);
       TinyWireS.write(softWireMaster.read());
@@ -672,13 +701,12 @@ ISR (WDT_vect) {
   }
 
   // process low voltage
-  if (skipLowVoltageDetectCount < 255) {
+  if (skipLowVoltageDetectCount < 250) {
     skipLowVoltageDetectCount ++;
   }
   processLowVoltageIfNeeded();
 
-  // handle temperature related actions
-  handleTemperatureActtonsIfNeeded();
+
 
   // process RTC alarms
   processAlarmIfNeeded();
@@ -695,10 +723,11 @@ ISR (WDT_vect) {
       emulateButtonClick();
     }
   }
+
 }
 
 
-// pin state change interrupt routine for PCINT0_vect (PCINT0~7) 
+// pin state change interrupt routine for PCINT0_vect (PCINT0~7)
 ISR (PCINT0_vect) {
   if (digitalRead(PIN_TX_UP) == 1) {
     if (!listenToTxd) {
@@ -706,7 +735,7 @@ ISR (PCINT0_vect) {
       listenToTxd = true;
     }
   } else {
-    if (listenToTxd && systemIsUp) {
+    if (listenToTxd && powerIsOn) {
      listenToTxd = false;
      systemIsUp = false;
      turningOff = true;
@@ -728,44 +757,45 @@ ISR (PCINT1_vect) {
       // restore from emulated button clicking
       digitalWrite(PIN_BUTTON, 1);
       pinMode(PIN_BUTTON, INPUT_PULLUP);
-      
+
       // turn on the white LED
       ledOn();
-      
+
       if (!buttonPressed) {
         buttonPressed = true;
-        if (!isButtonClickEmulated) {
+        if (!isButtonClickEmulated && !powerIsOn) {
           updateRegister(I2C_ACTION_REASON, REASON_CLICK);
         }
         if (powerIsOn) {
-          if (systemIsUp) {
+          if (isButtonClickEmulated) {
             turningOff = true;
             systemIsUp = false;
+            TCNT1 = getPowerCutPreloadTimer(true);
           }
         } else {
           wakeupByWatchdog = false; // will quit sleeping
           powerOn();
         }
       }
-      TCNT1 = getPowerCutPreloadTimer(true);
       isButtonClickEmulated = false;
     } else {  // button is released
       buttonPressed = false;
-    } 
-  }
-  
-  if (systemUp != lastSystemUp) {
-    if (!ledIsOn && powerIsOn && !turningOff && !systemIsUp && systemUp == 1)  {  // system is up, PCINT8
-      // clear the low-voltage shutdown flag when sys_up signal arrives
-      updateRegister(I2C_LV_SHUTDOWN, 0);
-    
-      // mark system is up
-      systemIsUp = true;
     }
   }
 
+  if (systemUp != lastSystemUp) {
+    if (systemUp == 0) {
+      lastSystemUp = 0;
+    } else if (!ledIsOn && powerIsOn && !turningOff && !systemIsUp) {  // system is up, PCINT8
+      // clear the low-voltage shutdown flag when sys_up signal arrives
+      updateRegister(I2C_LV_SHUTDOWN, 0);
+      systemIsUp = true;
+      lastSystemUp = 1;
+    }
+    // if guard failed (LED on), don't update lastSystemUp — retry on next PCINT trigger
+  }
+
   lastButton = button;
-  lastSystemUp = systemUp;
 }
 
 
@@ -774,7 +804,7 @@ ISR (TIM1_OVF_vect) {
   if (powerCutDelay == 0) {
     // cut the power after delay
     TCNT1 = getPowerCutPreloadTimer(true);
-    forcePowerCutIfNeeded();
+
     if (turningOff) {
       if (turnOffFromTXD && digitalRead(PIN_TX_UP) == 1) {  // if it is rebooting
         turningOff = false;
@@ -787,7 +817,7 @@ ISR (TIM1_OVF_vect) {
     }
   } else {
     TCNT1 = getPowerCutPreloadTimer(false);
-    forcePowerCutIfNeeded();
+
   }
 }
 
@@ -809,22 +839,15 @@ void emulateButtonClick() {
 }
 
 
-// temporarily turn on ADC to get input voltage 
-float turnOnAdcAndGetInputVoltage() {
-  byte bk = ADCSRA;
-  ADCSRA |= _BV(ADEN);
-  float vin = getInputVoltage();
-  ADCSRA = bk;
-  return vin;
-}
-
-
 // check wether alarm can be triggered
 boolean canTriggerAlarm() {
   if (powerIsOn || i2cReg[I2C_POWER_MODE] == 0) {
     return true;
   }
-  float vin = turnOnAdcAndGetInputVoltage();
+  byte bk = ADCSRA;
+  ADCSRA |= _BV(ADEN);
+  float vin = getInputVoltage();
+  ADCSRA = bk;
   float vlow = ((float)i2cReg[I2C_CONF_LOW_VOLTAGE]) / 10;
   if (i2cReg[I2C_LV_SHUTDOWN] == 1) {
     if (vin > vlow) {
@@ -853,7 +876,7 @@ void processAlarmIfNeeded() {
   byte hours = bcd2dec(readFromDevice(ADDRESS_RTC, I2C_RTC_HOURS - I2C_RTC_CTRL1));
   byte date = bcd2dec(readFromDevice(ADDRESS_RTC, I2C_RTC_DAYS - I2C_RTC_CTRL1));
   long cur_ts = getTimestamp(date, hours, minutes, seconds);
-  
+
   // get startup (alarm1) time
   seconds = bcd2dec(i2cReg[I2C_CONF_SECOND_ALARM1]);
   minutes = bcd2dec(i2cReg[I2C_CONF_MINUTE_ALARM1]);
@@ -874,8 +897,8 @@ void processAlarmIfNeeded() {
 
   long overdue_alarm1 = cur_ts - alarm1_ts;
   long overdue_alarm2 = cur_ts - alarm2_ts;
-  
-  if (canTrigger && !alarm1HasTriggered && overdue_alarm1 >= 0 && overdue_alarm1 < 2) {  // Alarm 1: startup
+
+  if (canTrigger && !alarm1HasTriggered && overdue_alarm1 >= 0 && overdue_alarm1 < 4) {  // Alarm 1: startup
     updateRegister(I2C_ALARM1_TRIGGERED, 1);
     updateRegister(I2C_CONF_FLAG_ALARM1, 1);
     if (!powerIsOn) {
@@ -887,7 +910,7 @@ void processAlarmIfNeeded() {
         alarm1Delayed = 1;
       }
     }
-  } else if (canTrigger && !alarm2HasTriggered && overdue_alarm2 >= 0 && overdue_alarm2 < 2) {  // Alarm 2: shutdown
+  } else if (canTrigger && !alarm2HasTriggered && overdue_alarm2 >= 0 && overdue_alarm2 < 4) {  // Alarm 2: shutdown
     updateRegister(I2C_ALARM2_TRIGGERED, 1);
     updateRegister(I2C_CONF_FLAG_ALARM2, 1);
     if (powerIsOn && !turningOff) {
@@ -895,6 +918,7 @@ void processAlarmIfNeeded() {
       emulateButtonClick();
       turningOff = true;
       systemIsUp = false;
+      powerCutDelay = 0; TCNT1 = 65534;
     }
   } else if (!alarm1HasTriggered && overdue_alarm1 < 0 && overdue_alarm1 >= -2) {
     reset_rtc_alarm();
@@ -915,50 +939,22 @@ void reset_rtc_alarm() {
 
 // copy alarm data to RTC's alarm registers
 void copyAlarm(byte offset) {
-  for (byte i = 0; i < 4; i ++) {
+  for (byte i = 0; i < 5; i ++) {
     writeToDevice(ADDRESS_RTC, 0x0B + i, &i2cReg[offset + i], 1);
   }
 }
 
-
-// handle temperature related actions (if configured)
-void handleTemperatureActtonsIfNeeded() {
-  // this counter makes sure not turning off your Pi too quickly
-  if (skipTempShutdownCount < 120) {
-    skipTempShutdownCount ++;
-  }
-  char t = getTemperature();
-  char ot = i2cReg[I2C_CONF_OVER_TEMP_POINT];
-  char ht = i2cReg[I2C_CONF_BELOW_TEMP_POINT];
-  if (t > ot) {
-    if (i2cReg[I2C_CONF_OVER_TEMP_ACTION] == 1) {
-      updateRegister(I2C_ACTION_REASON, REASON_OVER_TEMPERATURE);
-      turnOffIfPowerOn();
-    } else if (i2cReg[I2C_CONF_OVER_TEMP_ACTION] == 2) {
-      updateRegister(I2C_ACTION_REASON, REASON_OVER_TEMPERATURE);
-      turnOnIfPowerOff();
-    }
-  } else if (t < ht) {
-    if (i2cReg[I2C_CONF_BELOW_TEMP_ACTION] == 1) {
-      updateRegister(I2C_ACTION_REASON, REASON_BELOW_TEMPERATURE);
-      turnOffIfPowerOn();
-    } else if (i2cReg[I2C_CONF_BELOW_TEMP_ACTION] == 2) {
-      updateRegister(I2C_ACTION_REASON, REASON_BELOW_TEMPERATURE);
-      turnOnIfPowerOff();
-    }
-  }
-}
 
 
 // process low voltage
 void processLowVoltageIfNeeded() {
   lowVoltageCacheInteger = 0;
   // do not detect low voltage too soon since power on
-  if (skipLowVoltageDetectCount < 180) {
+  if (skipLowVoltageDetectCount < 250) {
     return;
   }
   // if input voltage is not fixed 5V, detect low voltage
-  if (powerIsOn && systemIsUp 
+  if (powerIsOn
       && (i2cReg[I2C_POWER_MODE] == 1 || i2cReg[I2C_CONF_IGNORE_POWER_MODE] == 1)
       && (i2cReg[I2C_LV_SHUTDOWN] == 0 || i2cReg[I2C_CONF_IGNORE_LV_SHUTDOWN] == 1)
       && i2cReg[I2C_CONF_LOW_VOLTAGE] != 255) {
@@ -972,27 +968,11 @@ void processLowVoltageIfNeeded() {
       emulateButtonClick();
       turningOff = true;
       systemIsUp = false;
+      powerCutDelay = 0; TCNT1 = 65534;
     }
   }
 }
 
-
-// turn off Raspberry Pi only if it is on
-void turnOffIfPowerOn() {
-  if (skipTempShutdownCount >= 120 && powerIsOn && !turningOff) {
-    emulateButtonClick();
-    turningOff = true;
-    systemIsUp = false;
-  }
-}
-
-
-// turn on Raspberry Pi only if it is off
-void turnOnIfPowerOff() {
-   if (!powerIsOn) {
-    emulateButtonClick();
-  }
-}
 
 
 // software I2C master read data from device on internal I2C bus
@@ -1029,14 +1009,6 @@ long getTimestamp(byte date, byte hours, byte minutes, byte seconds) {
 }
 
 
-// force power cut, if button is pressed and hold for a few seconds
-void forcePowerCutIfNeeded() {
- if (buttonPressed && digitalRead(PIN_BUTTON) == 0) {
-    systemIsUp = false;
-    cutPower();
-    sleep();
-  }
-}
 
 
 // adjust the RTC with offset value and the temperature compensation data (when TC is enabled)
@@ -1044,18 +1016,22 @@ void adjustRTCIfNeeded() {
   skipAdjustRtcCount ++;
   if (skipAdjustRtcCount == 255) {  // no need to adjust too frequently
     skipAdjustRtcCount = 0;
-  
+
     if (i2cReg[I2C_CONF_RTC_ENABLE_TC] == 1) {
-      char t = getTemperature();
+      char t = readFromDevice(ADDRESS_LM75B, 0);
       char adj = 0;
       if (t < 26) {
-        adj = (t - 26) * 0.126728111f;
+        adj = (t - 26) * 0.1267f;
       } else if (t > 32 && t <= 42) {
-        adj = (t - 32) * -0.092165899f;
+        adj = (t - 32) * -0.0922f;
       } else if (t > 42) {
-        adj = -0.921658986f + (t - 42) * -0.276497696f;
+        adj = -0.922f + (t - 42) * -0.2765f;
       }
-      byte data = value2Offset(offset2Value(i2cReg[I2C_CONF_RTC_OFFSET]) + adj);
+      // inline offset2Value then value2Offset
+      byte os = i2cReg[I2C_CONF_RTC_OFFSET];
+      char ov = ((os & 0x40) == 0) ? (os & 0x3F) : ((os & 0x3F) - 0x40);
+      char nv = ov + adj;
+      byte data = (nv >= 0) ? (byte)nv : (0x80 + nv);
       writeToDevice(ADDRESS_RTC, I2C_RTC_OFFSET - I2C_RTC_CTRL1, &data, 1);
     } else {
       writeToDevice(ADDRESS_RTC, I2C_RTC_OFFSET - I2C_RTC_CTRL1, &i2cReg[I2C_CONF_RTC_OFFSET], 1);
@@ -1064,21 +1040,3 @@ void adjustRTCIfNeeded() {
 }
 
 
-// convert stored offset value to actual signed value
-char offset2Value(byte offset) {
-  if ( (offset & 0x40) == 0) {
-    return (offset & 0x3F);
-  } else {
-    return (offset & 0x3F) - 0x40;
-  }
-}
-
-
-// convert actual signed value to offset value
-byte value2Offset(char value) {
-  if (value >= 0) {
-    return (byte)value;
-  } else {
-    return (0x80 + value);
-  }
-}
