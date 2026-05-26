@@ -69,12 +69,23 @@ if [ ! -z "$WITTYPI_DIR" ] && [ -f "$WITTYPI_DIR/utilities.sh" ]; then
     [ -f "$WITTYPI_DIR/$f" ] && cp "$WITTYPI_DIR/$f" "$BACKUP_DIR/$f"
   done
 
-  # copy updated scripts
+  # copy updated scripts atomically: write to a .new file then mv into
+  # place. If a reboot or kill interrupts the copy, the daemon will still
+  # find the previous (valid) version on disk instead of a half-written
+  # file that fails syntax checks at the next source.
   for f in $UPDATE_FILES; do
     if [ -f "$SRC_DIR/wittypi/$f" ]; then
-      cp "$SRC_DIR/wittypi/$f" "$WITTYPI_DIR/$f"
-      chmod +x "$WITTYPI_DIR/$f"
-      echo "  Updated $f"
+      cp "$SRC_DIR/wittypi/$f" "$WITTYPI_DIR/$f.new"
+      chmod +x "$WITTYPI_DIR/$f.new"
+      # syntax check before swapping in - protects against bad pushes
+      if bash -n "$WITTYPI_DIR/$f.new" 2>/dev/null; then
+        mv "$WITTYPI_DIR/$f.new" "$WITTYPI_DIR/$f"
+        echo "  Updated $f"
+      else
+        rm -f "$WITTYPI_DIR/$f.new"
+        echo "  SKIPPED $f (syntax check failed - keeping previous version)"
+        ((ERR++)) 2>/dev/null || true
+      fi
     fi
   done
 
@@ -100,7 +111,9 @@ if [ ! -z "$WITTYPI_DIR" ] && [ -f "$WITTYPI_DIR/utilities.sh" ]; then
     chown -R $SUDO_USER:$(id -g -n $SUDO_USER) "$WITTYPI_DIR" 2>/dev/null
   fi
 
-  # restart daemon
+  # restart daemon: kill the daemon and ANY backgrounded child (runScript.sh)
+  # that may still be writing to I2C alarm registers. Two concurrent writers
+  # could otherwise leave registers in an inconsistent state.
   echo ''
   echo '>>> Restarting daemon'
   if [ -f /var/run/wittypi_daemon.pid ]; then
@@ -111,6 +124,9 @@ if [ ! -z "$WITTYPI_DIR" ] && [ -f "$WITTYPI_DIR/utilities.sh" ]; then
       echo '  Stopped old daemon.'
     fi
   fi
+  # also kill any orphaned runScript.sh from the previous daemon's background launch
+  pkill -f "$WITTYPI_DIR/runScript.sh" 2>/dev/null && echo '  Stopped any active runScript.sh.'
+  sleep 1
   "$WITTYPI_DIR/daemon.sh" &
   sleep 1
   DAEMON_PID=$(ps --ppid $! -o pid= 2>/dev/null)
@@ -147,6 +163,26 @@ if [ ! -z "$WITTYPI_DIR" ] && [ -f "$WITTYPI_DIR/utilities.sh" ]; then
   echo '  Cron job set: check internet every 15 min (at :07/:22/:37/:52).'
   # ensure the script is present and executable on device
   chmod +x "$WITTYPI_DIR/checkInternet.sh" 2>/dev/null
+
+  # Enable the Raspberry Pi BCM2835 hardware watchdog via systemd.
+  # If the kernel ever hangs, the SoC watchdog will force a hard reboot
+  # after 30 seconds. This is the last line of defence against frozen Pis
+  # that the WittyPi firmware can't detect.
+  echo ''
+  echo '>>> Enabling kernel hardware watchdog (30s timeout)'
+  if [ -f /etc/systemd/system.conf ]; then
+    if grep -qE '^\s*RuntimeWatchdogSec=30\b' /etc/systemd/system.conf; then
+      echo '  Watchdog already enabled.'
+    else
+      # remove any existing line then append
+      sed -i.bak '/^#*\s*RuntimeWatchdogSec=/d' /etc/systemd/system.conf
+      echo 'RuntimeWatchdogSec=30' >> /etc/systemd/system.conf
+      systemctl daemon-reexec 2>/dev/null || true
+      echo '  Watchdog enabled (effective on next boot).'
+    fi
+  else
+    echo '  /etc/systemd/system.conf not found, skipping.'
+  fi
 
   echo ''
   echo '================================================================================'

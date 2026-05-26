@@ -63,6 +63,9 @@ if [ -z ${I2C_MC_ADDRESS+x} ]; then
   readonly I2C_CONF_OVER_TEMP_POINT=46
   readonly I2C_CONF_DEFAULT_ON_DELAY=47
 
+  readonly I2C_CONF_MISC=48
+  readonly I2C_CONF_GUARANTEED_WAKE=49
+
   readonly I2C_LM75B_TEMPERATURE=50
   readonly I2C_LM75B_CONF=51
   readonly I2C_LM75B_THYST=52
@@ -119,7 +122,7 @@ if [ -z ${I2C_MC_ADDRESS+x} ]; then
 
   TIME_UNKNOWN=0
 
-  SOFTWARE_VERSION='4.35'
+  SOFTWARE_VERSION='4.36'
 
   readonly LOCAL_TZ='Europe/London'
 fi
@@ -417,6 +420,107 @@ dst_correct()
   echo $(( alarm_epoch + begin_off - alarm_off ))
 }
 
+enable_guaranteed_wake()
+{
+  # Backstop wake mechanism: instructs the firmware to wake the Pi at least
+  # once every $1 hours (or days if $2='days') regardless of alarm state.
+  # This is the primary recovery path for stuck alarms, drained RTC backup,
+  # daemon crashes, SD corruption, and other field failures.
+  #
+  # Defensive: writes to register 49 (added in upstream Witty Pi 4 firmware,
+  # all known revs >= 7). On older firmware the write is harmless EEPROM
+  # storage with no effect; on supported firmware it provides the failsafe.
+  local value=${1:-24}      # default: 24 hours
+  local unit=${2:-hours}    # default: hours
+
+  if [ "$unit" = "days" ]; then
+    # bit 7 = 1 means days, bits 0-6 = count
+    value=$(( (value & 0x7F) | 0x80 ))
+  else
+    # bit 7 = 0 means hours, bits 0-6 = count
+    value=$(( value & 0x7F ))
+  fi
+
+  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_GUARANTEED_WAKE $value
+  local readback=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_GUARANTEED_WAKE)
+  if [ "$(($readback))" = "$value" ]; then
+    log "Guaranteed wake enabled (reg49=$readback)."
+  else
+    log "Guaranteed wake write attempted (reg49=$readback, wanted $value). May be unsupported by older firmware."
+  fi
+}
+
+enable_ignore_lv_shutdown()
+{
+  # Prevents a stale LV_SHUTDOWN=1 flag in EEPROM from blocking alarm1
+  # startup wakes after a low-voltage event. Without this, a single
+  # brownout can permanently disable scheduled wake until manual reset.
+  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_IGNORE_LV_SHUTDOWN 1
+  local readback=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_IGNORE_LV_SHUTDOWN)
+  log "Ignore LV shutdown flag set (reg42=$readback)."
+}
+
+verify_alarm_in_future()
+{
+  # Reads back an alarm register block and confirms the encoded time is in
+  # the future relative to current epoch. If the alarm is in the past or
+  # zero, writes a fallback "now + 1 hour" alarm.
+  # $1 = "startup" or "shutdown"
+  local kind=$1
+  local raw
+  if [ "$kind" = "startup" ]; then
+    raw=$(get_startup_time)
+  else
+    raw=$(get_shutdown_time)
+  fi
+
+  if [ "$raw" = "00 00:00:00" ]; then
+    log "WARN: $kind alarm is zero after write - applying fallback (now + 1 hour)."
+    apply_fallback_alarm "$kind"
+    return
+  fi
+
+  # Reconstruct UTC epoch from the raw "DD HH:MM:SS" (alarm registers are
+  # UTC since v4.24). Use current UTC month/year as context.
+  local alarm_epoch=$(date -u --date="$(date -u +%Y-%m-)$raw" +%s 2>/dev/null)
+  if [ -z "$alarm_epoch" ]; then
+    log "WARN: could not parse $kind alarm '$raw' - applying fallback."
+    apply_fallback_alarm "$kind"
+    return
+  fi
+
+  local now=$(current_timestamp)
+  # if alarm-day < today, it means the alarm is for next month; add a month
+  local alarm_day=${raw:0:2}
+  local today_day=$(date -u +%d)
+  if [ $((10#$alarm_day)) -lt $((10#$today_day)) ]; then
+    alarm_epoch=$((alarm_epoch + 86400 * 31))   # approx, fine for the in-future check
+  fi
+
+  if [ $alarm_epoch -le $((now + 30)) ]; then
+    log "WARN: $kind alarm '$raw' is not safely in the future - applying fallback (now + 1 hour)."
+    apply_fallback_alarm "$kind"
+  fi
+}
+
+apply_fallback_alarm()
+{
+  # Writes a "now + 1 hour" alarm of the requested kind.
+  # $1 = "startup" or "shutdown"
+  local kind=$1
+  local target=$(( $(current_timestamp) + 3600 ))
+  local d=$(date -u -d "@$target" +"%d")
+  local h=$(date -u -d "@$target" +"%H")
+  local m=$(date -u -d "@$target" +"%M")
+  local s=$(date -u -d "@$target" +"%S")
+  if [ "$kind" = "startup" ]; then
+    set_startup_time $d $h $m $s
+  else
+    set_shutdown_time $d $h $m $s
+  fi
+  log "Fallback $kind alarm set to: $(TZ=$LOCAL_TZ date -d @$target +'%Y-%m-%d %H:%M:%S %Z')"
+}
+
 current_timestamp()
 {
   # prefer system time (kept accurate by NTP) over RTC
@@ -543,14 +647,35 @@ schedule_script_interrupted()
   local startup_time=$(get_startup_time)
   local shutdown_time=$(get_shutdown_time)
   if [ "$startup_time" != '00 00:00:00' ] && [ "$shutdown_time" != '00 00:00:00' ] ; then
-    local st_timestamp=$(date -u --date="$(date -u +%Y-%m-)$startup_time" +%s)
-    local sd_timestamp=$(date -u --date="$(date -u +%Y-%m-)$shutdown_time" +%s)
+    local st_timestamp=$(_parse_alarm_to_epoch "$startup_time")
+    local sd_timestamp=$(_parse_alarm_to_epoch "$shutdown_time")
     local cur_timestamp=$(date +%s)
-    if [ $st_timestamp -gt $cur_timestamp ] && [ $sd_timestamp -lt $cur_timestamp ] ; then
+    if [ -n "$st_timestamp" ] && [ -n "$sd_timestamp" ] \
+       && [ $st_timestamp -gt $cur_timestamp ] && [ $sd_timestamp -lt $cur_timestamp ] ; then
       return 0
     fi
   fi
   return 1
+}
+
+_parse_alarm_to_epoch()
+{
+  # Convert a raw alarm "DD HH:MM:SS" (UTC) to an absolute UTC epoch,
+  # handling the month-boundary case: if the alarm's day is less than
+  # today's day, the alarm refers to NEXT month (e.g. today=2026-06-30,
+  # alarm=01 → it means 2026-07-01, not 2026-06-01).
+  # Returns empty string if parse fails.
+  local raw="$1"
+  local alarm_day=${raw:0:2}
+  local today_day=$(date -u +%d)
+  local ym
+  if [ $((10#$alarm_day)) -lt $((10#$today_day)) ]; then
+    # alarm is for next month
+    ym=$(date -u -d "$(date -u +%Y-%m-01) +1 month" +%Y-%m-)
+  else
+    ym=$(date -u +%Y-%m-)
+  fi
+  date -u --date="${ym}${raw}" +%s 2>/dev/null
 }
 
 get_power_mode()

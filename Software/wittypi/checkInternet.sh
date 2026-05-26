@@ -19,6 +19,12 @@ readonly PING_COUNT=2      # attempts per target
 readonly FAIL_THRESHOLD=3
 readonly STATE_FILE="$cur_dir/.net_fail_count"
 
+# Reboot loop protection: prevents a genuinely-offline device (3G outage,
+# dead SIM, ISP down) from rebooting forever and draining the battery.
+readonly REBOOT_LOG="$cur_dir/.net_reboot_log"   # one date stamp per line
+readonly MAX_REBOOTS_PER_DAY=2
+readonly MIN_UPTIME_SECONDS=1800   # don't reboot if uptime < 30 min
+
 # load previous failure count (0 if first run or reset)
 fail_count=0
 if [ -f "$STATE_FILE" ]; then
@@ -46,10 +52,32 @@ else
   log "Internet check: FAILED ($fail_count/$FAIL_THRESHOLD). Targets unreachable: ${PING_TARGETS[*]}"
 
   if [ "$fail_count" -ge "$FAIL_THRESHOLD" ]; then
-    log "Internet check: reached $FAIL_THRESHOLD consecutive failures. Rebooting..."
-    # reset counter so we don't reboot loop on next boot if still offline
-    echo 0 > "$STATE_FILE"
-    sync
-    shutdown -r now
+    # Uptime gate: if we just rebooted, give the network a chance to come up
+    uptime_sec=$(awk '{print int($1)}' /proc/uptime 2>/dev/null || echo 0)
+    if [ "$uptime_sec" -lt "$MIN_UPTIME_SECONDS" ]; then
+      log "Internet check: would reboot, but uptime is ${uptime_sec}s (< ${MIN_UPTIME_SECONDS}s). Skipping."
+    else
+      # Daily reboot cap: count today's reboots in $REBOOT_LOG
+      today=$(date -u +%Y-%m-%d)
+      # prune entries not from today
+      if [ -f "$REBOOT_LOG" ]; then
+        grep -c "^$today" "$REBOOT_LOG" > /dev/null 2>&1
+        reboots_today=$(grep -c "^$today" "$REBOOT_LOG" 2>/dev/null || echo 0)
+      else
+        reboots_today=0
+      fi
+      if [ "$reboots_today" -ge "$MAX_REBOOTS_PER_DAY" ]; then
+        log "Internet check: reached $FAIL_THRESHOLD failures, but already rebooted $reboots_today time(s) today. Skipping to avoid loop."
+      else
+        log "Internet check: reached $FAIL_THRESHOLD consecutive failures. Rebooting (today's reboot #$((reboots_today + 1)))..."
+        # log the reboot attempt and prune old entries (keep last 14 days)
+        ( grep -h "^[0-9]" "$REBOOT_LOG" 2>/dev/null | tail -50 ; echo "$today $(date -u +%H:%M:%S)" ) > "$REBOOT_LOG.new"
+        mv "$REBOOT_LOG.new" "$REBOOT_LOG"
+        # reset failure counter so we don't immediately reboot again on next boot
+        echo 0 > "$STATE_FILE"
+        sync
+        shutdown -r now
+      fi
+    fi
   fi
 fi

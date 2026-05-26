@@ -212,10 +212,21 @@ if [ -f $schedule_file ]; then
           fi
         fi
       done
+
+      # Safety backstop: after the schedule loop, verify both alarms are in
+      # the future. If a write was interrupted or the schedule produced a
+      # past-time alarm, fall back to "now + 1 hour" so the device always
+      # has a valid future wake/sleep target. Field devices cannot tolerate
+      # stale alarms left from interrupted runs.
+      verify_alarm_in_future "startup"
+      verify_alarm_in_future "shutdown"
     fi
   fi
 else
   log "File \"schedule.wpi\" not found, skip running schedule script."
+  # Even without a schedule, ensure there's a wake within 1 hour so the
+  # device cycles and gets another chance to recover.
+  apply_fallback_alarm "startup"
 fi
 
 echo '---------------------------------------------------'

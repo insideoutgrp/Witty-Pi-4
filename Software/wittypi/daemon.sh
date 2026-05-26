@@ -23,6 +23,13 @@ log "System: $os, Kernel: $kernel, Architecture: $arch"
 pi_model=$(get_pi_model)
 log "Running on $pi_model"
 
+# verify timezone data is present - schedules will silently drift by 1h
+# during BST if tzdata is missing
+if [ ! -f "/usr/share/zoneinfo/$LOCAL_TZ" ]; then
+  log "WARNING: tzdata for $LOCAL_TZ is missing. DST schedules will fail."
+  log "  Run: sudo apt-get install -y tzdata"
+fi
+
 # check 1-wire confliction
 if one_wire_confliction ; then
   log "Confliction: 1-Wire interface is enabled on GPIO-$HALT_PIN, which is also used by Witty Pi."
@@ -83,6 +90,20 @@ if [ $has_mc == 1 ] ; then
   # print out firmware revision
   firmwareRev=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_FW_REVISION)
   log "Firmware Revison: $firmwareRev"
+
+  # === Reliability backstops (v4.36+) ===
+  # These are written every boot so a fresh device or one with corrupted
+  # EEPROM gets the failsafes re-enabled. Safe on all firmware revisions:
+  # unsupported registers either no-op or store harmlessly in EEPROM.
+
+  # Guaranteed Wake: force the firmware to wake the Pi at least once every
+  # 24 hours regardless of alarm/RTC/LV state. Primary recovery mechanism.
+  enable_guaranteed_wake 24 hours
+
+  # Ignore stale LV_SHUTDOWN flag so a previous brownout doesn't gate
+  # future scheduled wakes.
+  enable_ignore_lv_shutdown
+
   # print out current voltages and current
   vout=$(get_output_voltage)
   iout=$(get_output_current)
