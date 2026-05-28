@@ -22,7 +22,8 @@ Modify the WittyPi 4 firmware (`WittyPi4.ino`) for an unattended field-deployed 
 
 | File | Purpose |
 |------|---------|
-| `Firmware/WittyPi4/WittyPi4.ino` | **Current firmware (Rev 13)** — canonical, imported into this repo |
+| `Firmware/WittyPi4/WittyPi4.ino` | **Current firmware (Rev 13)** — canonical edit target |
+| `Firmware/WittyPi4_v13/` | **Shippable Rev 13 sketch folder** — open in Arduino IDE and compile/flash |
 | `Firmware/FIRMWARE_ISSUES.md` | Initial issue review document (Rev 7 audit + Rev 10 fixes) |
 | `Firmware/WittyPi4_UserManual.pdf` | Official UUGear user manual |
 
