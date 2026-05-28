@@ -92,6 +92,18 @@ setup_on_state()
   if [ $script_duration -gt 0 ] && [ $((script_duration % 86400)) -eq 0 ]; then
     alarm_ts=$(dst_correct $begin $1)
   fi
+  # Floor at now + 60s. If the schedule engine computed an alarm2 closer
+  # than that to "now" (short-cycle schedules, RTC-fallback bad time,
+  # boot-time race), writing it could cause Timer1 to cut power before
+  # the daemon finishes booting. Push it to at least 60s out so the
+  # boot can complete and the next iteration of the schedule loop
+  # produces a sensible alarm.
+  local now_ts=$(current_timestamp)
+  if [ $alarm_ts -lt $((now_ts + 60)) ]; then
+    local original_ts=$alarm_ts
+    alarm_ts=$((now_ts + 60))
+    log "WARN: computed shutdown alarm was too close to now ($(TZ=$LOCAL_TZ date -d @$original_ts +'%H:%M:%S %Z')); floored to $(TZ=$LOCAL_TZ date -d @$alarm_ts +'%H:%M:%S %Z')."
+  fi
   log "Schedule next shutdown at: $(TZ=$LOCAL_TZ date -d @$alarm_ts +'%Y-%m-%d %H:%M:%S %Z')"
   local date=$(date -u -d "@$alarm_ts" +"%d")
   local hour=$(date -u -d "@$alarm_ts" +"%H")
