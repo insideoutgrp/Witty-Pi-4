@@ -450,9 +450,18 @@ void sleep() {
   set_sleep_mode(SLEEP_MODE_PWR_DOWN);    // power-down mode
   sleep_enable();                         // sets the Sleep Enable bit in the MCUCR Register (SE BIT)
 
-  // clear alarm triggered flags so alarms can re-fire without daemon intervention
+  // Rev14 patch: clear ALARM1_TRIGGERED so a stale startup alarm can re-fire
+  // if the daemon doesn't update it (defensive for the no-daemon case).
+  //
+  // DO NOT clear ALARM2_TRIGGERED here. When combined with the widened
+  // 86400s alarm match window and DEFAULT_ON=1 auto-recovery, clearing it
+  // caused a reboot loop:
+  //   alarm2 fires -> Pi shuts down -> firmware sleeps and clears flag ->
+  //   recovery voltage path wakes Pi (DC still applied) -> alarm2 still
+  //   in registers, flag=0 -> alarm2 fires again -> loop forever.
+  // alarm2's TRIGGERED flag is now ONLY cleared in receiveEvent when the
+  // Pi daemon writes a new alarm2 value (the firmware already does this).
   updateRegister(I2C_ALARM1_TRIGGERED, 0);
-  updateRegister(I2C_ALARM2_TRIGGERED, 0);
 
   GIMSK = _BV (PCIE1);                    // only enable interrupt for switch (PCINT9)
   PCMSK1 = _BV (PCINT9);

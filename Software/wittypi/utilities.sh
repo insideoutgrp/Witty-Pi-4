@@ -122,7 +122,7 @@ if [ -z ${I2C_MC_ADDRESS+x} ]; then
 
   TIME_UNKNOWN=0
 
-  SOFTWARE_VERSION='5.20'
+  SOFTWARE_VERSION='5.21'
 
   readonly LOCAL_TZ='Europe/London'
 fi
@@ -474,8 +474,14 @@ enable_default_on()
 verify_alarm_in_future()
 {
   # Reads back an alarm register block and confirms the encoded time is in
-  # the future relative to current epoch. If the alarm is in the past or
-  # zero, writes a fallback "now + 1 hour" alarm.
+  # the future relative to current epoch.
+  #   - For STARTUP alarms in the past: writes a fallback "now + 1 hour"
+  #     so the device always has a guaranteed wake target.
+  #   - For SHUTDOWN alarms in the past: CLEARS the alarm (zeros). With
+  #     the widened firmware match window, a past shutdown alarm would
+  #     re-fire immediately and cause a reboot loop on devices configured
+  #     for auto-recovery (DEFAULT_ON=1 + RECOVERY_VOLTAGE). Clearing it
+  #     means no scheduled shutdown until the daemon writes a new one.
   # $1 = "startup" or "shutdown"
   local kind=$1
   local raw
@@ -486,8 +492,12 @@ verify_alarm_in_future()
   fi
 
   if [ "$raw" = "00 00:00:00" ]; then
-    log "WARN: $kind alarm is zero after write - applying fallback (now + 1 hour)."
-    apply_fallback_alarm "$kind"
+    # zero shutdown alarm is fine (no scheduled shutdown); zero startup
+    # alarm needs a fallback so the device cycles eventually.
+    if [ "$kind" = "startup" ]; then
+      log "WARN: startup alarm is zero - applying fallback (now + 1 hour)."
+      apply_fallback_alarm "startup"
+    fi
     return
   fi
 
@@ -495,8 +505,12 @@ verify_alarm_in_future()
   # UTC since v4.24). Use current UTC month/year as context.
   local alarm_epoch=$(date -u --date="$(date -u +%Y-%m-)$raw" +%s 2>/dev/null)
   if [ -z "$alarm_epoch" ]; then
-    log "WARN: could not parse $kind alarm '$raw' - applying fallback."
-    apply_fallback_alarm "$kind"
+    log "WARN: could not parse $kind alarm '$raw' - resetting."
+    if [ "$kind" = "startup" ]; then
+      apply_fallback_alarm "startup"
+    else
+      clear_shutdown_time
+    fi
     return
   fi
 
@@ -509,14 +523,20 @@ verify_alarm_in_future()
   fi
 
   if [ $alarm_epoch -le $((now + 30)) ]; then
-    log "WARN: $kind alarm '$raw' is not safely in the future - applying fallback (now + 1 hour)."
-    apply_fallback_alarm "$kind"
+    if [ "$kind" = "startup" ]; then
+      log "WARN: startup alarm '$raw' is not safely in the future - applying fallback (now + 1 hour)."
+      apply_fallback_alarm "startup"
+    else
+      log "WARN: shutdown alarm '$raw' is in the past - CLEARING to prevent reboot loop."
+      clear_shutdown_time
+    fi
   fi
 }
 
 apply_fallback_alarm()
 {
   # Writes a "now + 1 hour" alarm of the requested kind.
+  # For shutdown alarms, prefer clear_shutdown_time over this function.
   # $1 = "startup" or "shutdown"
   local kind=$1
   local target=$(( $(current_timestamp) + 3600 ))

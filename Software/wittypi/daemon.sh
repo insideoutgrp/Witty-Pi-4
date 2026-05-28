@@ -115,6 +115,15 @@ if [ $has_mc == 1 ] ; then
     log 'L3V7: Auto-On when USB 5V connected enabled.'
   fi
 
+  # Anti-reboot-loop: clear any stale shutdown alarm at boot. With the
+  # firmware's widened 86400s match window combined with auto-recovery
+  # (DEFAULT_ON=1 + RECOVERY_VOLTAGE), a leftover past alarm2 from a
+  # previous schedule would re-fire immediately and trap the device in
+  # a power-cut/auto-resume loop. runScript.sh will write a fresh
+  # alarm2 if/when the schedule needs one.
+  log 'Clearing any stale shutdown alarm to prevent reboot loop.'
+  clear_shutdown_time
+
   # print out current voltages and current
   vout=$(get_output_voltage)
   iout=$(get_output_current)
