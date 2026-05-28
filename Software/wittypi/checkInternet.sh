@@ -12,6 +12,25 @@ cur_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 TIME_UNKNOWN=0
 
+# Don't race the daemon during the boot window. Note: this script doesn't
+# itself touch I2C heavily (only is_mc_connected indirectly), but we keep
+# the gate for consistency and to avoid I2C pings competing with the
+# daemon's startup writes.
+uptime_sec=$(awk '{print int($1)}' /proc/uptime 2>/dev/null || echo 9999)
+if [ "$uptime_sec" -lt 60 ]; then
+  log "Internet check: uptime ${uptime_sec}s < 60s, skipping (daemon still booting)."
+  exit 0
+fi
+
+# Serialise with syncTime.sh so we never have two scripts hitting the
+# Witty Pi I2C bus simultaneously.
+LOCK=/var/lock/wittypi.i2c.lock
+exec 9>"$LOCK"
+if ! flock -n 9 ; then
+  log 'Internet check: another wittypi cron job is using the I2C bus, deferring.'
+  exit 0
+fi
+
 # configurable
 readonly PING_TARGETS=('8.8.8.8' '1.1.1.1' 'www.google.com')
 readonly PING_TIMEOUT=15   # seconds - generous to accommodate 3G links

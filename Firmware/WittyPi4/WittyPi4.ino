@@ -4,6 +4,16 @@
  * Revision: 14
  *
  * Changelog:
+ *   Rev 14 patch (2026-05-28d):
+ *     - TXD-shutdown PCINT0 now requires systemIsUp == true before
+ *       acting on a HIGH->LOW transition. Without this guard, a
+ *       TXD glitch during early Pi boot (line floating-HIGH while
+ *       Pi was off, then briefly LOW as the bootloader configured
+ *       GPIO-14) was triggering a false shutdown ~0.5s after
+ *       alarm1 powered the Pi on — the symptom: power LED came
+ *       on briefly then went off again, Pi never reached the
+ *       daemon. Pi shutdown detection still works correctly
+ *       once SYS_UP has been signalled.
  *   Rev 14 patch (2026-05-28c):
  *     - REVERTED RECOVERY_VOLTAGE default from 30 (3.0V) back to 255
  *       (disabled). The 3.0V default made the sleep-loop LV recovery
@@ -355,6 +365,12 @@ void setup() {
   if (defaultOn) {
     delay(i2cReg[I2C_CONF_DEFAULT_ON_DELAY] * 1000);  // delay if the value is configured
     updateRegister(I2C_ACTION_REASON, REASON_POWER_CONNECTED);
+    // Rev14 patch (2026-05-28d): same stale-alarm2 guard as alarm1 wake -
+    // if the EEPROM-resident alarm2 time falls within the 86400s match
+    // window, the first WDT tick after powerOn() would otherwise fire
+    // it and Timer1 would cut power within milliseconds. The daemon
+    // rewrites alarm2 from the schedule, which clears this flag.
+    updateRegister(I2C_ALARM2_TRIGGERED, 1);
     powerOn();  // power on directly
   } else {
     sleep();    // sleep and wait for button action
@@ -850,7 +866,17 @@ ISR (PCINT0_vect) {
       listenToTxd = true;
     }
   } else {
-    if (listenToTxd && powerIsOn) {
+    // Rev14 patch (2026-05-28d): require systemIsUp before treating a
+    // TXD LOW as a Pi shutdown signal. Without this guard, the TXD
+    // line glitching during early Pi boot (the line can be floating-
+    // HIGH while Pi is off, then transition LOW briefly as the
+    // bootloader configures GPIO-14 / UART_TXD) was triggering a
+    // false shutdown ~0.5s after alarm1 powered the Pi on. The
+    // daemon's SYS_UP pulse (PCINT1) sets systemIsUp = true once
+    // the Pi has actually finished its critical-path boot, so by
+    // then a TXD LOW genuinely means "Pi is shutting down". Until
+    // then, ignore TXD edges as boot-time noise.
+    if (listenToTxd && powerIsOn && systemIsUp) {
      listenToTxd = false;
      systemIsUp = false;
      turningOff = true;
@@ -1019,6 +1045,16 @@ void processAlarmIfNeeded() {
     updateRegister(I2C_CONF_FLAG_ALARM1, 1);
     if (!powerIsOn) {
       updateRegister(I2C_ACTION_REASON, REASON_ALARM1);
+      // Rev14 patch (2026-05-28d): suppress any stale alarm2 across the
+      // wake. The alarm2 registers still hold the previous shutdown
+      // time-of-day, and the widened 86400s match window means alarm2
+      // would re-match on the first WDT tick after powerOn(). Without
+      // this guard, that match fires turningOff=true; TCNT1=65534; and
+      // Timer1 cuts power within milliseconds - the Pi's power LED
+      // comes on briefly then goes dark and the device never boots.
+      // The daemon's next alarm2 register write will clear this flag
+      // via receiveEvent, so normal scheduled shutdowns still work.
+      updateRegister(I2C_ALARM2_TRIGGERED, 1);
       // Rev13: wake from sleep directly. Previously emulateButtonClick()
       // pulsed PIN_BUTTON to trigger PCINT1's wake handler.
       wakeupByWatchdog = false;
