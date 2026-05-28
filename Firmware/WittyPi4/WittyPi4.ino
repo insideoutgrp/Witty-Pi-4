@@ -4,6 +4,17 @@
  * Revision: 14
  *
  * Changelog:
+ *   Rev 14 patch (2026-05-28c):
+ *     - REVERTED RECOVERY_VOLTAGE default from 30 (3.0V) back to 255
+ *       (disabled). The 3.0V default made the sleep-loop LV recovery
+ *       condition fire every ~4 seconds after any scheduled alarm2
+ *       shutdown (because Vin from the DC input is always >3V),
+ *       auto-waking the Pi instead of letting it stay asleep. The
+ *       Pi now stays asleep after alarm2 until alarm1 / button /
+ *       Guaranteed Wake (24h backstop). Fresh devices without a
+ *       configured RECOVERY_VOLTAGE now require an explicit user
+ *       choice or daemon override; this matches the original Witty
+ *       Pi 4 behaviour.
  *   Rev 14 patch (2026-05-28b):
  *     - REVERTED the "don't clear ALARM2_TRIGGERED on sleep" change
  *       from the original Rev 14 push. Keeping that flag set across
@@ -378,10 +389,14 @@ void initializeRegisters() {
   i2cReg[I2C_CONF_LOW_VOLTAGE] = 255;
   i2cReg[I2C_CONF_BLINK_LED] = 100;
   i2cReg[I2C_CONF_POWER_CUT_DELAY] = 70;
-  // Rev13: default recovery voltage 3.0V so even a brand-new unit (where
-  // the Pi daemon has never run to push its own settings) wakes from
-  // LV-shutdown when any reasonable DC input is restored.
-  i2cReg[I2C_CONF_RECOVERY_VOLTAGE] = 30;
+  // Rev14 patch (2026-05-28c): revert RECOVERY_VOLTAGE default to 255
+  // (disabled). The previous default of 30 (3.0V) caused the sleep-loop
+  // LV recovery condition to fire every ~4 seconds after a scheduled
+  // alarm2 shutdown, auto-waking the Pi instead of letting it stay
+  // asleep until alarm1. With 255, the Pi only wakes via alarm1,
+  // button, or Guaranteed Wake (24h backstop) - the intended behaviour
+  // for field-deployed devices with scheduled on/off cycles.
+  i2cReg[I2C_CONF_RECOVERY_VOLTAGE] = 255;
 
   i2cReg[I2C_CONF_ADJ_VIN] = 20;
   i2cReg[I2C_CONF_ADJ_VOUT] = 20;

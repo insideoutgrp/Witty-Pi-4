@@ -99,20 +99,38 @@ if [ $has_mc == 1 ] ; then
   # 24 hours regardless of alarm/RTC/LV state. Primary recovery mechanism.
   enable_guaranteed_wake 24 hours
 
-  # Ignore stale LV_SHUTDOWN flag so a previous brownout doesn't gate
-  # future scheduled wakes.
-  enable_ignore_lv_shutdown
+  # Explicitly CLEAR IGNORE_LV_SHUTDOWN (previously set to 1 in v5.21+ as
+  # a defensive measure). With it set, the firmware's sleep-loop LV
+  # recovery condition `(LV_SHUTDOWN || LOW_VOLTAGE==255 || IGNORE_LV_SHUTDOWN)`
+  # always evaluates true, forcing wake whenever Vin > RECOVERY_VOLTAGE.
+  # The result: every scheduled alarm2 shutdown is followed by an
+  # immediate auto-wake, looking like a power cycle instead of a real
+  # sleep. We don't actually need IGNORE_LV_SHUTDOWN because the
+  # firmware clears LV_SHUTDOWN on the SYS_UP signal that daemon.sh
+  # sends at the end of boot.
+  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_IGNORE_LV_SHUTDOWN 0
+  log 'Cleared IGNORE_LV_SHUTDOWN (was forcing LV-recovery wake every sleep).'
 
   # "Any power input wakes" - power on the Pi automatically whenever main
   # power is applied. With this set, the Pi never needs a manual button
   # press to come up after a power event.
   enable_default_on
 
-  # On the L3V7 variant, also auto-on when USB 5V is connected.
-  # Setting recovery_voltage = 1 enables the USB-5V auto-on behaviour.
+  # Configure recovery-voltage wake behaviour by variant:
+  #   - Regular Witty Pi 4: RECOVERY_VOLTAGE = 255 (disabled). The Pi
+  #     will only come back online via alarm1, button, or Guaranteed
+  #     Wake - exactly what we want for scheduled shutdowns to stay
+  #     "down" until the next scheduled startup.
+  #   - L3V7 variant (firmware ID 0x37): RECOVERY_VOLTAGE = 1, which
+  #     in that variant's firmware semantics means "auto-on when USB
+  #     5V is connected". That's a deliberate user-visible feature
+  #     for L3V7, not the same as the generic LV recovery path.
   if [ $(($firmwareID)) -eq 55 ]; then
     i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_RECOVERY_VOLTAGE 1
     log 'L3V7: Auto-On when USB 5V connected enabled.'
+  else
+    i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_RECOVERY_VOLTAGE 255
+    log 'LV recovery wake disabled (RECOVERY_VOLTAGE=255) - Pi stays asleep until alarm1/button/guaranteed wake.'
   fi
 
   # Anti-reboot-loop: validate the shutdown alarm. If it's in the past
