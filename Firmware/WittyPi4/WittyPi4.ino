@@ -1,9 +1,23 @@
 /**
  * Firmware for WittyPi 4
  *
- * Revision: 13
+ * Revision: 14
  *
  * Changelog:
+ *   Rev 14 (2026-05-28):
+ *     - Physical button shutdown removed entirely. PCINT1 ISR no
+ *       longer initiates shutdown under any circumstance. The
+ *       button/GPIO-4 shared line is now untouched by firmware
+ *       code — knocks, shorts, or EMI on the line cannot affect
+ *       a running Pi. Scheduled (alarm2) and LV shutdowns drive
+ *       turningOff + Timer1 directly, no PIN_BUTTON pulse.
+ *     - Alarm1 wake from sleep sets wakeupByWatchdog = false
+ *       directly (was emulateButtonClick()).
+ *     - Removed: emulateButtonClick() function and the
+ *       isButtonClickEmulated state flag (now unused).
+ *     - Manual wake-from-sleep on button press preserved as a
+ *       maintenance override.
+ *     - I2C_FW_REVISION bumped to 0x0E.
  *   Rev 13 (2026-05-26):
  *     - Reliability: moved sleep() out of Timer1 ISR. Now sets
  *       a pendingSleep flag from the ISR and runs sleep() from
@@ -22,17 +36,6 @@
  *     - Default I2C_CONF_RECOVERY_VOLTAGE = 30 (3.0V) so even a
  *       fresh unit recovers from LV-shutdown on any reasonable
  *       DC input, without depending on the Pi daemon having run.
- *     - Physical button no longer initiates shutdown under any
- *       circumstances. The PCINT1 button path used to be gated
- *       by isButtonClickEmulated; the whole gate is gone now.
- *       Scheduled and LV shutdowns drive turningOff + Timer1
- *       directly instead of pulsing PIN_BUTTON. Alarm1 wake
- *       sets wakeupByWatchdog = false directly. The shared
- *       button/GPIO-4 line is now untouched by firmware code,
- *       so external knocks/shorts on the button line cannot
- *       affect the running Pi.
- *     - Removed: emulateButtonClick() function and the
- *       isButtonClickEmulated state flag (now unused).
  *     - Removed dormant features for flash headroom:
  *       * Temperature-action shutdown/startup (registers 43-46
  *         retained as no-op for backwards compat — LM75B no
@@ -354,7 +357,7 @@ void loop() {
 // initialize the registers and synchronize with EEPROM
 void initializeRegisters() {
   i2cReg[I2C_ID] = 0x26;
-  i2cReg[I2C_FW_REVISION] = 0x0D;
+  i2cReg[I2C_FW_REVISION] = 0x0E;
 
   i2cReg[I2C_CONF_ADDRESS] = 0x08;
 

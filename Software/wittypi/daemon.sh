@@ -91,7 +91,7 @@ if [ $has_mc == 1 ] ; then
   firmwareRev=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_FW_REVISION)
   log "Firmware Revison: $firmwareRev"
 
-  # === Reliability backstops (v5.0+, requires firmware Rev 13) ===
+  # === Reliability backstops (v5.1+, requires firmware Rev 14) ===
   # Written every boot so a fresh device or one with corrupted EEPROM gets
   # the failsafes re-enabled.
 

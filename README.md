@@ -5,15 +5,15 @@
 > | Branch | Pi software | Firmware required | Use for |
 > |---|---|---|---|
 > | **`main`** | v4.36 | Any (Rev 7+) — firmware-agnostic | Devices already in the field on stock or older firmware. Adds DST handling, periodic time sync, internet watchdog, schedule fallbacks, guaranteed-wake backstop, atomic deploy, kernel watchdog. |
-> | **`firmware-rev13`** | v5.0 | Rev 13 (in `Firmware/WittyPi4/WittyPi4.ino` on this branch) | Devices freshly flashed with Rev 13 firmware. Adds ISR safety (sleep moved out of Timer1 ISR), I2C bus mutex, widened alarm window, "any power input wakes" default-on, strips dormant temperature/dummy-load code. |
+> | **`firmware-rev14`** | v5.1 | Rev 14 (in `Firmware/WittyPi4_v14/WittyPi4_v14.ino` on this branch) | Devices freshly flashed with Rev 14 firmware. Adds ISR safety (sleep moved out of Timer1 ISR), I²C bus mutex, widened alarm window, "any power input wakes" default-on, physical button shutdown removed entirely, strips dormant temperature/dummy-load code. |
 >
 > Deploy commands:
 > ```bash
 > # Older firmware in the field:
 > curl -sSL https://raw.githubusercontent.com/insideoutgrp/Witty-Pi-4/main/Software/deploy.sh | sudo bash
 >
-> # Rev 13 firmware:
-> curl -sSL https://raw.githubusercontent.com/insideoutgrp/Witty-Pi-4/firmware-rev13/Software/deploy.sh | sudo bash
+> # Rev 14 firmware:
+> curl -sSL https://raw.githubusercontent.com/insideoutgrp/Witty-Pi-4/firmware-rev14/Software/deploy.sh | sudo bash
 > ```
 >
 > See `Firmware/PROJECT_CONTEXT.md` and `Firmware/FIRMWARE_ISSUES.md` for the firmware engineering history.

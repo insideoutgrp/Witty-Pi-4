@@ -14,17 +14,17 @@ if [ "$(id -u)" != 0 ]; then
 fi
 
 REPO_URL="https://github.com/insideoutgrp/Witty-Pi-4"
-BRANCH="firmware-rev13"
-MIN_FW_REVISION=13   # firmware Rev 13 required for v5.0+ Pi software
+BRANCH="firmware-rev14"
+MIN_FW_REVISION=14   # firmware Rev 14 required for v5.1+ Pi software
 TMP_DIR=$(mktemp -d)
 
 echo '================================================================================'
 echo '|                                                                              |'
-echo '|          Witty Pi 4 v5.0 (Rev13 firmware) - Remote Deploy                    |'
+echo '|          Witty Pi 4 v5.1 (Rev14 firmware) - Remote Deploy                    |'
 echo '|                                                                              |'
 echo '================================================================================'
 echo ''
-echo 'This branch requires firmware Revision 13 or later. Devices still on'
+echo 'This branch requires firmware Revision 14 or later. Devices still on'
 echo 'older firmware must use the "main" branch instead.'
 echo ''
 

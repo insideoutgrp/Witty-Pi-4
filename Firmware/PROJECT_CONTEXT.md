@@ -22,8 +22,8 @@ Modify the WittyPi 4 firmware (`WittyPi4.ino`) for an unattended field-deployed 
 
 | File | Purpose |
 |------|---------|
-| `Firmware/WittyPi4/WittyPi4.ino` | **Current firmware (Rev 13)** — canonical edit target |
-| `Firmware/WittyPi4_v13/` | **Shippable Rev 13 sketch folder** — open in Arduino IDE and compile/flash |
+| `Firmware/WittyPi4/WittyPi4.ino` | **Current firmware (Rev 14)** — canonical edit target |
+| `Firmware/WittyPi4_v14/` | **Shippable Rev 14 sketch folder** — open in Arduino IDE and compile/flash |
 | `Firmware/FIRMWARE_ISSUES.md` | Initial issue review document (Rev 7 audit + Rev 10 fixes) |
 | `Firmware/WittyPi4_UserManual.pdf` | Official UUGear user manual |
 
@@ -49,6 +49,19 @@ The firmware uses `emulateButtonClick()` to drive PIN_BUTTON LOW, which:
 For scheduled events (alarm2, low voltage, temperature), the firmware ALSO directly sets `turningOff=true` and starts the Timer1 countdown — so power gets cut after the configured delay (default 7 seconds) regardless of whether the Pi gracefully shuts down or not.
 
 ## Revision History
+
+### Rev 14 (2026-05-28) — Physical button shutdown removed
+- **Button safety:** the physical button no longer initiates shutdown
+  under any circumstances. `PCINT1_vect`'s shutdown branch is gone.
+- **No firmware code touches `PIN_BUTTON` anymore** — the shared
+  button/GPIO-4 line is firmware-untouched, so external noise, EMI,
+  knocks, or shorts on the button cannot affect a running Pi.
+- Scheduled (alarm2) and LV shutdowns drive `turningOff` + Timer1
+  directly. Alarm1 wake sets `wakeupByWatchdog = false` directly.
+- **Removed:** `emulateButtonClick()` function and the
+  `isButtonClickEmulated` flag (now unused).
+- Manual button-wake-from-sleep preserved as a maintenance override.
+- `I2C_FW_REVISION` bumped to `0x0E`.
 
 ### Rev 13 (2026-05-26) — Field reliability + "any power input wakes"
 Following the four-agent reliability audit (see commit history on the
