@@ -6,7 +6,7 @@ Shippable Arduino sketch folder for flashing onto Witty Pi 4 hardware.
 
 | File | Purpose |
 |------|---------|
-| `WittyPi4_v14.ino` | The Rev 14 firmware source (~1040 lines) |
+| `WittyPi4_v14.ino` | The Rev 14 firmware source (~1050 lines, includes patches b–e) |
 | `SoftIICMaster.h`, `SoftWireMaster.h` | Software I²C master headers used by the firmware |
 
 This is a snapshot of `Firmware/WittyPi4/WittyPi4.ino` packaged in an Arduino-compatible sketch folder (folder name must match the `.ino` name).

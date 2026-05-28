@@ -6,6 +6,26 @@
 
 export LC_ALL=en_GB.UTF-8
 
+# v5.26 / v4.42: ensure PATH includes sbin dirs. cron runs scripts with
+# PATH=/usr/bin:/bin only, which is missing i2cdetect (in /usr/sbin) —
+# so any cron-spawned script (syncTime.sh, checkInternet.sh) that calls
+# is_mc_connected() would silently fail with "i2cdetect: command not
+# found" and assume the Witty Pi was disconnected. Idempotent: only
+# appends sbin entries that aren't already present.
+case ":$PATH:" in
+  *":/usr/sbin:"*) ;;
+  *) PATH="$PATH:/usr/sbin" ;;
+esac
+case ":$PATH:" in
+  *":/sbin:"*) ;;
+  *) PATH="$PATH:/sbin" ;;
+esac
+case ":$PATH:" in
+  *":/usr/local/sbin:"*) ;;
+  *) PATH="$PATH:/usr/local/sbin" ;;
+esac
+export PATH
+
 if [ -z ${I2C_MC_ADDRESS+x} ]; then
   readonly I2C_MC_ADDRESS=0x08
 
@@ -122,7 +142,7 @@ if [ -z ${I2C_MC_ADDRESS+x} ]; then
 
   TIME_UNKNOWN=0
 
-  SOFTWARE_VERSION='5.25'
+  SOFTWARE_VERSION='5.26'
 
   readonly LOCAL_TZ='Europe/London'
 fi

@@ -4,6 +4,18 @@
  * Revision: 14
  *
  * Changelog:
+ *   Rev 14 patch (2026-05-28e):
+ *     - Bug fix: turnOffFromTXD was sticky after a reboot detection in
+ *       the Timer1 ISR. The reboot branch sets turningOff = false and
+ *       lights the LED but never cleared turnOffFromTXD. On the next
+ *       shutdown trigger (alarm2, LV), the Timer1 ISR's reboot test
+ *       `(turnOffFromTXD && PIN_TX_UP == 1)` would re-fire — PIN_TX_UP
+ *       is normally HIGH on a running Pi — and cutPower() would never
+ *       be called. Symptom: scheduled shutdown logs the alarm match,
+ *       sets reason = REASON_ALARM2, but the Pi keeps running. Fix:
+ *       clear turnOffFromTXD inside the reboot branch, AND
+ *       defensively clear it whenever alarm2 or LV shutdown is
+ *       initiated so those paths can never be diverted.
  *   Rev 14 patch (2026-05-28d):
  *     - TXD-shutdown PCINT0 now requires systemIsUp == true before
  *       acting on a HIGH->LOW transition. Without this guard, a
@@ -940,6 +952,14 @@ ISR (TIM1_OVF_vect) {
     if (turningOff) {
       if (turnOffFromTXD && digitalRead(PIN_TX_UP) == 1) {  // if it is rebooting
         turningOff = false;
+        // Rev14e: clear turnOffFromTXD here. Previously this branch left the
+        // flag "sticky" — so the NEXT time turningOff was set (e.g. by alarm2
+        // or LV shutdown), this branch would be re-entered as long as
+        // PIN_TX_UP happened to be HIGH (which it normally is on a running
+        // Pi), and cutPower() would never be called. Net effect: scheduled
+        // shutdown silently no-ops once a reboot has been observed, until
+        // the next clean cutPower()/loop-side reset.
+        turnOffFromTXD = false;
         updateRegister(I2C_ACTION_REASON, REASON_REBOOT);
         ledOn();
       } else {  // cut the power and defer sleep to loop()
@@ -1073,6 +1093,9 @@ void processAlarmIfNeeded() {
       // and arming Timer1 is sufficient - Timer1's overflow ISR will call
       // cutPower() and defer sleep() to loop(). The button line is no
       // longer manipulated for shutdown so a noisy GPIO-4 share is safe.
+      // Rev14e: belt-and-braces clear turnOffFromTXD so this alarm2 path
+      // can NEVER be diverted into the Timer1 reboot branch.
+      turnOffFromTXD = false;
       turningOff = true;
       systemIsUp = false;
       powerCutDelay = 0; TCNT1 = 65534;
@@ -1123,6 +1146,9 @@ void processLowVoltageIfNeeded() {
       updateRegister(I2C_LV_SHUTDOWN, 1);
       updateRegister(I2C_ACTION_REASON, REASON_LOW_VOLTAGE);
       // Rev13: same direct shutdown pattern as alarm2 - no PIN_BUTTON pulse.
+      // Rev14e: belt-and-braces clear turnOffFromTXD so the LV shutdown path
+      // can NEVER be diverted into the Timer1 reboot branch.
+      turnOffFromTXD = false;
       turningOff = true;
       systemIsUp = false;
       powerCutDelay = 0; TCNT1 = 65534;
