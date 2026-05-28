@@ -4,6 +4,14 @@
  * Revision: 14
  *
  * Changelog:
+ *   Rev 14 patch (2026-05-28b):
+ *     - REVERTED the "don't clear ALARM2_TRIGGERED on sleep" change
+ *       from the original Rev 14 push. Keeping that flag set across
+ *       sleep blocked the next scheduled shutdown when the daemon
+ *       didn't rewrite alarm2 on the subsequent boot. The reboot
+ *       loop this was meant to prevent is already blocked by the
+ *       WDT ISR setting the flag during sleep, plus the Pi-side
+ *       verify_alarm_in_future cleanup.
  *   Rev 14 (2026-05-28):
  *     - Physical button shutdown removed entirely. PCINT1 ISR no
  *       longer initiates shutdown under any circumstance. The
@@ -450,18 +458,23 @@ void sleep() {
   set_sleep_mode(SLEEP_MODE_PWR_DOWN);    // power-down mode
   sleep_enable();                         // sets the Sleep Enable bit in the MCUCR Register (SE BIT)
 
-  // Rev14 patch: clear ALARM1_TRIGGERED so a stale startup alarm can re-fire
-  // if the daemon doesn't update it (defensive for the no-daemon case).
+  // Clear both alarm triggered flags so alarms can re-fire on next match
+  // without requiring the Pi daemon to write to alarm registers first.
   //
-  // DO NOT clear ALARM2_TRIGGERED here. When combined with the widened
-  // 86400s alarm match window and DEFAULT_ON=1 auto-recovery, clearing it
-  // caused a reboot loop:
-  //   alarm2 fires -> Pi shuts down -> firmware sleeps and clears flag ->
-  //   recovery voltage path wakes Pi (DC still applied) -> alarm2 still
-  //   in registers, flag=0 -> alarm2 fires again -> loop forever.
-  // alarm2's TRIGGERED flag is now ONLY cleared in receiveEvent when the
-  // Pi daemon writes a new alarm2 value (the firmware already does this).
+  // (A previous Rev 14 patch kept ALARM2_TRIGGERED set across sleep to
+  // defend against an alarm2 reboot loop on auto-recovery, but it had
+  // the side effect of permanently blocking the next scheduled
+  // shutdown if anything went wrong with the daemon's alarm2 rewrite
+  // on the subsequent boot. Reverted: the reboot loop is independently
+  // prevented because the WDT ISR runs throughout sleep — when the
+  // alarm time matches during sleep, processAlarmIfNeeded sets the
+  // flag itself but takes no action because powerIsOn is false. By
+  // the time auto-recovery brings the Pi back online, the flag is
+  // already set, so the second match doesn't re-fire. The Pi-side
+  // verify_alarm_in_future on every daemon boot is an additional
+  // layer for stale past alarms.)
   updateRegister(I2C_ALARM1_TRIGGERED, 0);
+  updateRegister(I2C_ALARM2_TRIGGERED, 0);
 
   GIMSK = _BV (PCIE1);                    // only enable interrupt for switch (PCINT9)
   PCMSK1 = _BV (PCINT9);
