@@ -135,6 +135,52 @@ SRC_DIR="${WITTYPI_SRC:-$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/wittyp
 # scripts that carry the DST fix (v4.24)
 UPDATE_FILES="utilities.sh daemon.sh runScript.sh wittyPi.sh syncTime.sh checkInternet.sh"
 
+# Sync $src_dir/*.wpi into $dst_dir/, exactly:
+#   - removes .wpi files on device not present in source
+#   - adds source files not on device
+#   - updates files whose content differs
+#   - preserves schedule.wpi (the user's active selection)
+sync_schedules() {
+  local src_dir="$1"
+  local dst_dir="$2"
+  if [ ! -d "$src_dir" ]; then
+    echo '  No source schedules directory found, skipping.'
+    return 0
+  fi
+  mkdir -p "$dst_dir"
+  local added=0 updated=0 removed=0 unchanged=0
+  if [ -d "$dst_dir" ]; then
+    for existing in "$dst_dir"/*.wpi; do
+      [ -e "$existing" ] || continue
+      local name=$(basename "$existing")
+      [ "$name" = "schedule.wpi" ] && continue
+      if [ ! -f "$src_dir/$name" ]; then
+        rm -f "$existing"
+        echo "  Removed: $name"
+        removed=$((removed + 1))
+      fi
+    done
+  fi
+  for src in "$src_dir"/*.wpi; do
+    [ -e "$src" ] || continue
+    local name=$(basename "$src")
+    if [ -f "$dst_dir/$name" ]; then
+      if ! cmp -s "$src" "$dst_dir/$name"; then
+        cp "$src" "$dst_dir/$name"
+        echo "  Updated: $name"
+        updated=$((updated + 1))
+      else
+        unchanged=$((unchanged + 1))
+      fi
+    else
+      cp "$src" "$dst_dir/$name"
+      echo "  Added:   $name"
+      added=$((added + 1))
+    fi
+  done
+  echo "  Total: $added added, $updated updated, $removed removed, $unchanged unchanged."
+}
+
 # install or update wittyPi
 if [ $ERR -eq 0 ]; then
   if [ -d "$DIR" ] && [ -f "$DIR/utilities.sh" ]; then
@@ -166,13 +212,10 @@ if [ $ERR -eq 0 ]; then
         fi
       done
 
-      # update schedules
+      # sync schedules (existing install path)
       SCHED_SRC="$(dirname "$SRC_DIR")/../Schedules"
-      if [ -d "$SCHED_SRC" ]; then
-        mkdir -p "wittypi/schedules"
-        cp "$SCHED_SRC/"*.wpi "wittypi/schedules/" 2>/dev/null
-        echo "  Updated schedules"
-      fi
+      echo '  Syncing schedules...'
+      sync_schedules "$SCHED_SRC" "wittypi/schedules"
 
       chown -R $SUDO_USER:$(id -g -n $SUDO_USER) wittypi || ((ERR++))
 
@@ -225,12 +268,10 @@ if [ $ERR -eq 0 ]; then
     update-rc.d wittypi defaults || ((ERR++))
     touch wittyPi.log
     touch schedule.log
-    # copy custom schedules
+    # sync custom schedules (fresh install path - cwd is the wittypi install dir)
     SCHED_SRC="$(dirname "$SRC_DIR")/../Schedules"
-    if [ -d "$SCHED_SRC" ]; then
-      cp "$SCHED_SRC/"*.wpi schedules/ 2>/dev/null
-      echo '  Installed custom schedules'
-    fi
+    echo '  Syncing schedules...'
+    sync_schedules "$SCHED_SRC" "schedules"
     cd ..
     chown -R $SUDO_USER:$(id -g -n $SUDO_USER) wittypi || ((ERR++))
     sleep 2
