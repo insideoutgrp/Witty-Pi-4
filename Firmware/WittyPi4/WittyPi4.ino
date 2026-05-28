@@ -22,6 +22,17 @@
  *     - Default I2C_CONF_RECOVERY_VOLTAGE = 30 (3.0V) so even a
  *       fresh unit recovers from LV-shutdown on any reasonable
  *       DC input, without depending on the Pi daemon having run.
+ *     - Physical button no longer initiates shutdown under any
+ *       circumstances. The PCINT1 button path used to be gated
+ *       by isButtonClickEmulated; the whole gate is gone now.
+ *       Scheduled and LV shutdowns drive turningOff + Timer1
+ *       directly instead of pulsing PIN_BUTTON. Alarm1 wake
+ *       sets wakeupByWatchdog = false directly. The shared
+ *       button/GPIO-4 line is now untouched by firmware code,
+ *       so external knocks/shorts on the button line cannot
+ *       affect the running Pi.
+ *     - Removed: emulateButtonClick() function and the
+ *       isButtonClickEmulated state flag (now unused).
  *     - Removed dormant features for flash headroom:
  *       * Temperature-action shutdown/startup (registers 43-46
  *         retained as no-op for backwards compat — LM75B no
@@ -233,7 +244,7 @@ volatile boolean ledIsOn = false;
 
 volatile unsigned int powerCutDelay = 0;
 
-volatile boolean isButtonClickEmulated = false;
+// (Rev13: isButtonClickEmulated removed alongside emulateButtonClick.)
 
 volatile byte skipAdjustRtcCount = 0;
 
@@ -782,7 +793,9 @@ ISR (WDT_vect) {
     if (alarm1Delayed == 4) {
       alarm1Delayed = 0;
       updateRegister(I2C_ACTION_REASON, REASON_ALARM1_DELAYED);
-      emulateButtonClick();
+      // Rev13: wake from sleep directly. Previously this called
+      // emulateButtonClick() to trigger PCINT1's wake path.
+      wakeupByWatchdog = false;
     }
   }
 
@@ -816,30 +829,21 @@ ISR (PCINT1_vect) {
 
   if (button != lastButton) {
     if (button == 0) {   // button is pressed, PCINT9
-      // restore from emulated button clicking
-      digitalWrite(PIN_BUTTON, 1);
-      pinMode(PIN_BUTTON, INPUT_PULLUP);
-
-      // turn on the white LED
-      ledOn();
-
       if (!buttonPressed) {
         buttonPressed = true;
-        if (!isButtonClickEmulated && !powerIsOn) {
+        // Rev13: physical button is intentionally inert while the Pi is
+        // running. No shutdown is initiated regardless of how the press
+        // arrives — this protects the device from accidental knocks or
+        // shorts on the shared button/GPIO-4 line. Scheduled shutdowns
+        // (alarm2, low voltage) bypass this path entirely and drive
+        // turningOff + Timer1 directly.
+        if (!powerIsOn) {
+          // Manual wake from sleep is preserved as a maintenance override.
+          ledOn();
           updateRegister(I2C_ACTION_REASON, REASON_CLICK);
-        }
-        if (powerIsOn) {
-          if (isButtonClickEmulated) {
-            turningOff = true;
-            systemIsUp = false;
-            TCNT1 = getPowerCutPreloadTimer(true);
-          }
-        } else {
-          wakeupByWatchdog = false; // will quit sleeping
-          powerOn();
+          wakeupByWatchdog = false; // signal sleep loop to exit
         }
       }
-      isButtonClickEmulated = false;
     } else {  // button is released
       buttonPressed = false;
     }
@@ -898,12 +902,12 @@ void updateRegister(byte index, byte value) {
 }
 
 
-// emulate button clicking
-void emulateButtonClick() {
-  isButtonClickEmulated = true;
-  pinMode(PIN_BUTTON, OUTPUT);
-  digitalWrite(PIN_BUTTON, 0);
-}
+// (Rev13: emulateButtonClick() removed. The function previously drove
+// PIN_BUTTON LOW to trigger PCINT1 for two purposes:
+//   - waking the Pi from sleep on alarm1 (now done via wakeupByWatchdog)
+//   - signalling shutdown via the now-removed button shutdown path
+// Driving the shared button/GPIO-4 line was risky on its own and the
+// remaining functionality is achieved without it.)
 
 
 // check wether alarm can be triggered
@@ -975,7 +979,9 @@ void processAlarmIfNeeded() {
     updateRegister(I2C_CONF_FLAG_ALARM1, 1);
     if (!powerIsOn) {
       updateRegister(I2C_ACTION_REASON, REASON_ALARM1);
-      emulateButtonClick();
+      // Rev13: wake from sleep directly. Previously emulateButtonClick()
+      // pulsed PIN_BUTTON to trigger PCINT1's wake handler.
+      wakeupByWatchdog = false;
     } else {
       // power is not cut yet, will power on later if alarm1 delay is allowed
       if ((i2cReg[I2C_CONF_MISC] & 0x01) == 0) {
@@ -987,7 +993,10 @@ void processAlarmIfNeeded() {
     updateRegister(I2C_CONF_FLAG_ALARM2, 1);
     if (powerIsOn && !turningOff) {
       updateRegister(I2C_ACTION_REASON, REASON_ALARM2);
-      emulateButtonClick();
+      // Rev13: shut down without touching PIN_BUTTON. Setting turningOff
+      // and arming Timer1 is sufficient - Timer1's overflow ISR will call
+      // cutPower() and defer sleep() to loop(). The button line is no
+      // longer manipulated for shutdown so a noisy GPIO-4 share is safe.
       turningOff = true;
       systemIsUp = false;
       powerCutDelay = 0; TCNT1 = 65534;
@@ -1037,7 +1046,7 @@ void processLowVoltageIfNeeded() {
       lowVoltageCacheDecimal = i2cReg[I2C_VOLTAGE_IN_D];
       updateRegister(I2C_LV_SHUTDOWN, 1);
       updateRegister(I2C_ACTION_REASON, REASON_LOW_VOLTAGE);
-      emulateButtonClick();
+      // Rev13: same direct shutdown pattern as alarm2 - no PIN_BUTTON pulse.
       turningOff = true;
       systemIsUp = false;
       powerCutDelay = 0; TCNT1 = 65534;
