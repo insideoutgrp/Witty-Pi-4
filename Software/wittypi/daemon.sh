@@ -104,6 +104,17 @@ if [ $has_mc == 1 ] ; then
   # future scheduled wakes.
   enable_ignore_lv_shutdown
 
+  # Anti-reboot-loop: clear any stale shutdown alarm at boot. The
+  # main-branch device may be on any firmware revision; older firmware
+  # has the narrow 4s match window so the loop risk is much smaller -
+  # but devices the user may eventually flash with Rev 14 would inherit
+  # the stale alarm from the EEPROM. Clearing at boot is defensive and
+  # harmless on any firmware. runScript.sh writes a fresh alarm2 when
+  # the schedule needs one.
+  log 'Clearing any stale shutdown alarm at boot.'
+  clear_shutdown_time
+
+
   # print out current voltages and current
   vout=$(get_output_voltage)
   iout=$(get_output_current)

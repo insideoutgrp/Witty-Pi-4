@@ -211,24 +211,48 @@ if [ ! -z "$WITTYPI_DIR" ] && [ -f "$WITTYPI_DIR/utilities.sh" ]; then
   # ensure the script is present and executable on device
   chmod +x "$WITTYPI_DIR/checkInternet.sh" 2>/dev/null
 
-  # Enable the Raspberry Pi BCM2835 hardware watchdog via systemd.
-  # If the kernel ever hangs, the SoC watchdog will force a hard reboot
-  # after 30 seconds. This is the last line of defence against frozen Pis
-  # that the WittyPi firmware can't detect.
+  # Strip any gpio-shutdown dtoverlay configured for GPIO-4 from the boot
+  # config. The Witty Pi button is hardwired to both PIN_BUTTON on the
+  # ATtiny AND GPIO-4 on the Pi header. If a prior UUGear install (or
+  # someone configuring gpio-shutdown manually) left this overlay in
+  # place, pressing the button drives GPIO-4 low which makes systemd
+  # immediately shutdown the Pi - regardless of firmware Rev 14's
+  # button-disable behaviour. Strip it so the button cannot trigger
+  # shutdown via the kernel either.
   echo ''
-  echo '>>> Enabling kernel hardware watchdog (30s timeout)'
-  if [ -f /etc/systemd/system.conf ]; then
-    if grep -qE '^\s*RuntimeWatchdogSec=30\b' /etc/systemd/system.conf; then
-      echo '  Watchdog already enabled.'
+  echo '>>> Checking /boot/config.txt for gpio-shutdown overlay'
+  CFG=''
+  if [ -f /boot/firmware/config.txt ]; then
+    CFG=/boot/firmware/config.txt
+  elif [ -f /boot/config.txt ]; then
+    CFG=/boot/config.txt
+  fi
+  if [ -n "$CFG" ]; then
+    if grep -Eq '^\s*dtoverlay=gpio-shutdown' "$CFG"; then
+      cp "$CFG" "${CFG}.bak"
+      sed -i.tmp '/^\s*dtoverlay=gpio-shutdown/d' "$CFG"
+      rm -f "${CFG}.tmp"
+      echo "  Removed gpio-shutdown overlay from $CFG (backup: ${CFG}.bak)."
+      echo '  Effective on next reboot.'
     else
-      # remove any existing line then append
-      sed -i.bak '/^#*\s*RuntimeWatchdogSec=/d' /etc/systemd/system.conf
-      echo 'RuntimeWatchdogSec=30' >> /etc/systemd/system.conf
-      systemctl daemon-reexec 2>/dev/null || true
-      echo '  Watchdog enabled (effective on next boot).'
+      echo '  No gpio-shutdown overlay found.'
     fi
   else
-    echo '  /etc/systemd/system.conf not found, skipping.'
+    echo '  No /boot/config.txt found, skipping.'
+  fi
+
+  # NOTE: BCM2835 hardware watchdog enablement was REMOVED in v4.38/v5.21
+  # after a field-device reboot loop. The schedule/alarm pipeline already
+  # has multiple independent failsafes (firmware Guaranteed Wake,
+  # runScript fallback alarms, daemon retry, cron-based time/internet
+  # checks). If a previous deploy enabled the watchdog, strip the setting
+  # as a precaution so it can't compound any boot-time issues.
+  if [ -f /etc/systemd/system.conf ]; then
+    if grep -qE '^\s*RuntimeWatchdogSec=' /etc/systemd/system.conf; then
+      sed -i.bak '/^\s*RuntimeWatchdogSec=/d' /etc/systemd/system.conf
+      systemctl daemon-reexec 2>/dev/null || true
+      echo '  Disabled previously-configured RuntimeWatchdogSec (precaution).'
+    fi
   fi
 
   echo ''
