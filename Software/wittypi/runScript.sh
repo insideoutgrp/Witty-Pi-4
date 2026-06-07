@@ -174,8 +174,26 @@ if [ -f $schedule_file ]; then
         if [ $found_on == 0 ] && [[ ${states[$index]} == ON* ]] ; then
           found_on=1
         fi
+        # v5.27 / v4.43: compare against the DST-corrected boundary, not raw
+        # epoch. The loop walks check_time in raw seconds; setup_*_state
+        # applies dst_correct() at the very end. During BST, raw boundaries
+        # land 1h ahead of the intended local clock — so the comparison
+        # `check_time >= cur_time` picks the just-passed boundary, then
+        # dst_correct shifts the alarm 1h into the past. Net effect on
+        # daily schedules in BST: each cycle boundary loses an hour, and
+        # boots near a boundary trigger floor/fallback to "now + 1h",
+        # silently swallowing the segment we were supposed to be running.
+        # The +60s slack absorbs the common case of the daemon firing a
+        # few seconds after a boundary; it's well under any segment
+        # duration in the bundled schedules (min = 5 min heartbeat).
+        # First-cycle iterations have script_duration=0 so are left
+        # uncorrected, matching the existing setup_*_state behaviour.
+        effective_ct=$check_time
+        if [ $script_duration -gt 0 ] && [ $((script_duration % 86400)) -eq 0 ]; then
+          effective_ct=$(dst_correct $begin $check_time)
+        fi
         # find the current ON state and incoming OFF state
-        if [ $((check_time >= cur_time)) == '1' ] && ([ $found_states == 1 ] || [[ ${states[$index]} == ON* ]]) ; then
+        if [ $((effective_ct + 60 >= cur_time)) == '1' ] && ([ $found_states == 1 ] || [[ ${states[$index]} == ON* ]]) ; then
           found_states=$((found_states+1))
           if [[ ${states[$index]} == ON* ]]; then
             if [[ ${states[$index]} == *WAIT ]]; then
