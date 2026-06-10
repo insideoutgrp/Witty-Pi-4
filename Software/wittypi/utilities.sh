@@ -142,7 +142,7 @@ if [ -z ${I2C_MC_ADDRESS+x} ]; then
 
   TIME_UNKNOWN=0
 
-  SOFTWARE_VERSION='5.27'
+  SOFTWARE_VERSION='5.28'
 
   readonly LOCAL_TZ='Europe/London'
 fi
@@ -169,13 +169,17 @@ one_wire_confliction()
 
 has_internet()
 {
-  curl -s --head --connect-timeout 3 "$INTERNET_SERVER" > /dev/null
+  # v5.28 / v4.44: bump connect-timeout 3s -> 15s, add max-time. 3s is too
+  # short for 3G/4G negotiation on field devices (matches checkInternet.sh's
+  # PING_TIMEOUT=15). max-time bounds total wait so a hung TCP doesn't
+  # block the daemon boot.
+  curl -s --head --connect-timeout 15 --max-time 25 "$INTERNET_SERVER" > /dev/null
   return $?
 }
 
 get_network_timestamp()
 {
-  local t=$(curl -sI --connect-timeout 3 "$INTERNET_SERVER" | grep -i "^Date:" | sed 's/Date: //Ig' | tr -d '\r')
+  local t=$(curl -sI --connect-timeout 15 --max-time 25 "$INTERNET_SERVER" | grep -i "^Date:" | sed 's/Date: //Ig' | tr -d '\r')
   if [ -n "$t" ]; then
     date -d "$t" +%s 2>/dev/null || echo -1
   else
@@ -367,7 +371,16 @@ net_to_system()
   local net_ts=$(get_network_timestamp)
   if [[ "$net_ts" != "-1" ]]; then
     log '  Applying network time to system...'
+    # v5.28 / v4.44: briefly disable NTP, slam the clock, then re-enable
+    # NTP. Without the re-enable, a prior offline-boot's rtc_to_system
+    # (which calls `timedatectl set-ntp 0`) leaves NTP off persistently —
+    # so systemd-timesyncd never refines the clock between cron ticks.
+    # The disable+enable bracket also prevents timesyncd from fighting
+    # the manual `date -s`. set-ntp 1 is idempotent and harmless if
+    # timesyncd isn't installed.
+    sudo timedatectl set-ntp 0 >/dev/null 2>&1
     sudo date -u -s @$net_ts >/dev/null
+    sudo timedatectl set-ntp 1 >/dev/null 2>&1
     log '  Done :-)'
   else
     log '  Can not get legit network time.'
@@ -400,8 +413,18 @@ rtc_to_system()
 {
   log '  Writing RTC time to system...'
   local rtc_ts=$(get_rtc_timestamp)
-  sudo timedatectl set-ntp 0 >/dev/null
+  # v5.28 / v4.44: re-enable NTP after the manual set. Previously this
+  # function called `timedatectl set-ntp 0` (so date -s wouldn't fight
+  # timesyncd) but never re-enabled, leaving systemd-timesyncd
+  # permanently disabled. Combined with the every-15-min HTTP-Date
+  # cron sync only giving 1s resolution and no drift discipline, that
+  # left field devices unable to recover from large clock errors:
+  # once NTP was off, drift accumulated faster than the cron sync
+  # could catch — and if has_internet ever failed on a tick (3G
+  # outage, 3s timeout, etc.) the clock just kept walking.
+  sudo timedatectl set-ntp 0 >/dev/null 2>&1
   sudo date -s @$rtc_ts >/dev/null
+  sudo timedatectl set-ntp 1 >/dev/null 2>&1
   TIME_UNKNOWN=0
   log '  Done :-)'
 }
