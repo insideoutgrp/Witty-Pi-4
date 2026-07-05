@@ -78,10 +78,12 @@ else
     else
       # Daily reboot cap: count today's reboots in $REBOOT_LOG
       today=$(date -u +%Y-%m-%d)
-      # prune entries not from today
       if [ -f "$REBOOT_LOG" ]; then
-        grep -c "^$today" "$REBOOT_LOG" > /dev/null 2>&1
-        reboots_today=$(grep -c "^$today" "$REBOOT_LOG" 2>/dev/null || echo 0)
+        # v4.45: no `|| echo 0` - grep -c already prints 0 (while exiting
+        # 1), so the fallback produced the two-line string "0\n0" which
+        # made the -ge test below error out. Sanitise instead.
+        reboots_today=$(grep -c "^$today" "$REBOOT_LOG" 2>/dev/null)
+        [[ "$reboots_today" =~ ^[0-9]+$ ]] || reboots_today=0
       else
         reboots_today=0
       fi

@@ -36,9 +36,15 @@ fi
 
 if has_internet ; then
   log 'Time sync: Internet available, syncing...'
-  net_to_system
-  system_to_rtc
-  log "Time sync: Complete. RTC set to $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+  # v4.45: only write system->RTC when the network time actually applied
+  # (net_to_system returns non-zero when the Date header was unusable -
+  # writing the RTC then would copy a possibly-drifted clock into it).
+  if net_to_system ; then
+    system_to_rtc
+    log "Time sync: Complete. RTC set to $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+  else
+    log 'Time sync: network time unusable, RTC left untouched.'
+  fi
 else
   log 'Time sync: No internet, skipping.'
 fi

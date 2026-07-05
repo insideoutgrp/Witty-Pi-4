@@ -107,7 +107,13 @@ if [ ! -z "$WITTYPI_DIR" ] && [ -f "$WITTYPI_DIR/utilities.sh" ]; then
   fi
 
   echo "  Updating to v${TARGET_VER}..."
-  UPDATE_FILES="utilities.sh daemon.sh runScript.sh wittyPi.sh syncTime.sh checkInternet.sh"
+  # v4.45: utilities.sh is copied LAST because it carries SOFTWARE_VERSION,
+  # which the already-at-target check above reads. If the deploy is
+  # interrupted mid-loop (these devices power off on schedule), a
+  # version-first order left new utilities + old scripts and every rerun
+  # said "already up to date" - locking the mixed install in permanently.
+  # With version-last, an interrupted deploy simply reruns.
+  UPDATE_FILES="daemon.sh runScript.sh wittyPi.sh syncTime.sh checkInternet.sh utilities.sh"
 
   # backup
   BACKUP_DIR="$WITTYPI_DIR/backup_v${CURRENT_VER:-old}_$(date +%Y%m%d_%H%M%S)"
@@ -185,10 +191,17 @@ if [ ! -z "$WITTYPI_DIR" ] && [ -f "$WITTYPI_DIR/utilities.sh" ]; then
   fi
 
   # immediate time sync to migrate RTC to UTC
+  # v4.45: capture status instead of letting a non-zero exit kill the
+  # deploy under `set -e`. syncTime.sh legitimately exits non-zero when
+  # the just-restarted daemon holds the I2C lock or the MCU probe races
+  # it; that abort previously ran BEFORE the cron entries below were
+  # installed, leaving fresh conversions with no time-sync and no
+  # connectivity watchdog at all.
   echo ''
   echo '>>> Syncing time and migrating RTC to UTC'
-  "$WITTYPI_DIR/syncTime.sh" >> "$WITTYPI_DIR/wittyPi.log" 2>&1
-  if [ $? -eq 0 ]; then
+  SYNC_RC=0
+  "$WITTYPI_DIR/syncTime.sh" >> "$WITTYPI_DIR/wittyPi.log" 2>&1 || SYNC_RC=$?
+  if [ $SYNC_RC -eq 0 ]; then
     echo '  RTC migrated to UTC.'
   else
     echo '  No internet - RTC will be migrated on next sync.'

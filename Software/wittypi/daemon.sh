@@ -44,6 +44,16 @@ if ! hash gpio 2>/dev/null; then
 fi
 
 
+# v4.45: serialise I2C access with the cron jobs (syncTime/checkInternet
+# take flock -n on the same file and politely skip while we hold it).
+# Their 60s uptime gate doesn't cover slow boots - the sync curls below
+# alone can push our register writes past uptime 60-100s, exactly when a
+# cron tick lands. Bounded wait so a stuck lock can never stall the boot.
+exec 9>/var/lock/wittypi.i2c.lock
+if ! flock -w 30 9 ; then
+  log 'Could not acquire I2C lock within 30s - continuing without it.'
+fi
+
 # check if micro controller presents
 has_mc=$(is_mc_connected)
 for i in {1..5}; do
@@ -67,16 +77,27 @@ if [ $has_mc == 1 ] ; then
   i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_RTC_CTRL1 0
   
   # synchronize time: prefer network, then RTC as fallback
+  # v4.45: only write system->RTC when network time was actually applied.
+  # has_internet (curl HEAD) can succeed while the Date header is
+  # unusable; system_to_rtc would then overwrite a CORRECT RTC with
+  # fake-hwclock's last-shutdown time, inverting the whole schedule
+  # until a later sync succeeded.
+  net_synced=0
   if has_internet ; then
     log 'Internet available, syncing time from network...'
-    net_to_system
-    system_to_rtc
-  elif [ $(rtc_has_bad_time) == 1 ]; then
-    log 'RTC has bad time and no internet, write system time into RTC'
-    system_to_rtc
-  else
-    log 'No internet, using RTC time'
-    rtc_to_system
+    if net_to_system ; then
+      net_synced=1
+      system_to_rtc
+    fi
+  fi
+  if [ $net_synced -eq 0 ]; then
+    if [ $(rtc_has_bad_time) == 1 ]; then
+      log 'RTC has bad time and no usable network time, write system time into RTC'
+      system_to_rtc
+    else
+      log 'No usable network time, using RTC time'
+      rtc_to_system
+    fi
   fi
 
   # check if system was shut down because of low-voltage
@@ -133,18 +154,14 @@ if [ $has_mc == 1 ] ; then
     log 'LV recovery wake disabled (RECOVERY_VOLTAGE=255) - Pi stays asleep until alarm1/button/guaranteed wake.'
   fi
 
-  # Anti-reboot-loop: validate the shutdown alarm. If it's in the past,
-  # CLEAR it (prevents the reboot loop seen when firmware Rev 13/14
-  # combines its widened 86400s match window with auto-recovery — a
-  # leftover past alarm2 would fire-shut-recover-fire forever). If
-  # alarm2 is in the future, LEAVE IT ALONE so a valid scheduled
-  # shutdown still fires as planned.
-  #
-  # On main-branch firmware-agnostic deployments the loop risk on older
-  # firmware is small (narrow 4s match window), but devices may later
-  # be flashed with Rev 14 and inherit a stale EEPROM alarm. This
-  # check is cheap, defensive, and works on any firmware revision.
-  log 'Validating shutdown alarm (clear only if stale)...'
+  # Shutdown-alarm sanity check. v4.45: LOG-ONLY for shutdown alarms -
+  # verify_alarm_in_future no longer clears them. On Rev 14 firmware a
+  # stale alarm2 is already suppressed by ALARM2_TRIGGERED set at wake,
+  # and runScript.sh rewrites alarm2 right after this; the old clear
+  # created a rewrite-from-zeros torn state that could race the
+  # firmware into a mid-boot power cut. On older firmware (4s match
+  # window) stale alarms were never a re-fire risk anyway.
+  log 'Checking shutdown alarm state...'
   verify_alarm_in_future "shutdown"
 
 
@@ -204,6 +221,8 @@ if [ $has_mc == 1 ] ; then
     log 'System starts up because it previously reboot.'
   elif [ "$reason" == $REASON_GUARANTEED_WAKE ]; then
     log 'System starts up because guaranteed wake is triggered.'
+  elif [ "$reason" == $REASON_SYS_UP_TIMEOUT ]; then
+    log 'System starts up after the firmware boot watchdog power-cycled a hung boot (no SYS_UP within 30 min).'
   else
     log "Unknown/incorrect startup reason: $reason"
   fi
@@ -225,8 +244,10 @@ fi
 "$cur_dir/beforeScript.sh" >> "$cur_dir/wittyPi.log" 2>&1
 
 # run schedule script
+# v4.45: close the lock fd (9>&-) in the child - runScript takes its own
+# lock and would otherwise deadlock against the copy it inherited from us.
 if [ $has_mc == 1 ] ; then
-  "$cur_dir/runScript.sh" 0 revise >> "$cur_dir/schedule.log" &
+  "$cur_dir/runScript.sh" 0 revise >> "$cur_dir/schedule.log" 9>&- &
 else
   log 'Witty Pi is not connected, skip schedule script...'
 fi
