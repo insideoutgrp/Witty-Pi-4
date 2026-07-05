@@ -697,6 +697,18 @@ void sleep() {
 }
 
 
+// Rev15: shared immediate-cut arming used by alarm2, LV shutdown and the
+// SYS_UP boot watchdog (factored out to save flash - the chip is full).
+// Timer1's overflow ISR performs the actual cutPower() ~ms later.
+void armImmediateCut() {
+  turnOffFromTXD = false;
+  turningOff = true;
+  systemIsUp = false;
+  powerCutDelay = 0;
+  TCNT1 = 65534;
+}
+
+
 // cut 5V output on GPIO header
 void cutPower() {
   powerIsOn = false;
@@ -862,24 +874,25 @@ void receiveEvent(int count) {
     } else if (i2cIndex >= I2C_CONF_ADDRESS && i2cIndex < I2C_REG_COUNT) {  // non-virtual, writable i2c register
       if (TinyWireS.available()) {
         // clear alarm triggered flag if alam is changed
-        // Rev15: each branch also arms alarmWriteHold - the Pi writes each
-        // alarm as 4 separate transactions, and clearing TRIGGERED at the
-        // first byte re-armed the OLD (still in-window) alarm value for
-        // the duration of the rewrite; a WDT tick landing in that window
-        // hard-cut power mid-boot. The hold pauses alarm evaluation,
-        // refreshed per byte, expiring ~5s after the last one - far
-        // longer than the rewrite takes.
-        if (i2cIndex >= I2C_CONF_SECOND_ALARM1 && i2cIndex <= I2C_CONF_WEEKDAY_ALARM1) {
-          updateRegister(I2C_ALARM1_TRIGGERED, 0);
-          // a rewritten alarm1 invalidates any pending delayed-start state
-          // (stale alarm1Delayed caused a spurious wake 3s after the next
-          // scheduled shutdown)
-          alarm1Delayed = 0;
+        // Rev15: any alarm-register write also arms alarmWriteHold - the
+        // Pi writes each alarm as 4 separate transactions, and clearing
+        // TRIGGERED at the first byte re-armed the OLD (still in-window)
+        // alarm value for the duration of the rewrite; a WDT tick landing
+        // in that window hard-cut power mid-boot. The hold pauses alarm
+        // evaluation, refreshed per byte, expiring ~5s after the last
+        // one - far longer than the rewrite takes. (Registers 27-36 are
+        // contiguous: alarm1 then alarm2.)
+        if (i2cIndex >= I2C_CONF_SECOND_ALARM1 && i2cIndex <= I2C_CONF_WEEKDAY_ALARM2) {
           alarmWriteHold = 5;
-        }
-        if (i2cIndex >= I2C_CONF_SECOND_ALARM2 && i2cIndex <= I2C_CONF_WEEKDAY_ALARM2) {
-          updateRegister(I2C_ALARM2_TRIGGERED, 0);
-          alarmWriteHold = 5;
+          if (i2cIndex <= I2C_CONF_WEEKDAY_ALARM1) {
+            updateRegister(I2C_ALARM1_TRIGGERED, 0);
+            // a rewritten alarm1 invalidates any pending delayed-start
+            // state (stale alarm1Delayed caused a spurious wake 3s after
+            // the next scheduled shutdown)
+            alarm1Delayed = 0;
+          } else {
+            updateRegister(I2C_ALARM2_TRIGGERED, 0);
+          }
         }
 
         // update the register value
@@ -963,9 +976,7 @@ ISR (WDT_vect) {
     if (sysUpWatchdog >= SYS_UP_TIMEOUT_SECS) {
       sysUpWatchdog = 0;
       updateRegister(I2C_ACTION_REASON, REASON_SYS_UP_TIMEOUT);
-      turnOffFromTXD = false;
-      turningOff = true;
-      powerCutDelay = 0; TCNT1 = 65534;
+      armImmediateCut();
     }
   }
 
@@ -1267,12 +1278,9 @@ void processAlarmIfNeeded() {
       // and arming Timer1 is sufficient - Timer1's overflow ISR will call
       // cutPower() and defer sleep() to loop(). The button line is no
       // longer manipulated for shutdown so a noisy GPIO-4 share is safe.
-      // Rev14e: belt-and-braces clear turnOffFromTXD so this alarm2 path
-      // can NEVER be diverted into the Timer1 reboot branch.
-      turnOffFromTXD = false;
-      turningOff = true;
-      systemIsUp = false;
-      powerCutDelay = 0; TCNT1 = 65534;
+      // (armImmediateCut also clears turnOffFromTXD - Rev14e fix - so
+      // this path can never be diverted into the Timer1 reboot branch.)
+      armImmediateCut();
     }
   } else if (!alarm1HasTriggered && overdue_alarm1 < 0 && overdue_alarm1 >= -2) {
     reset_rtc_alarm();
@@ -1320,12 +1328,7 @@ void processLowVoltageIfNeeded() {
       updateRegister(I2C_LV_SHUTDOWN, 1);
       updateRegister(I2C_ACTION_REASON, REASON_LOW_VOLTAGE);
       // Rev13: same direct shutdown pattern as alarm2 - no PIN_BUTTON pulse.
-      // Rev14e: belt-and-braces clear turnOffFromTXD so the LV shutdown path
-      // can NEVER be diverted into the Timer1 reboot branch.
-      turnOffFromTXD = false;
-      turningOff = true;
-      systemIsUp = false;
-      powerCutDelay = 0; TCNT1 = 65534;
+      armImmediateCut();
     }
   }
 }

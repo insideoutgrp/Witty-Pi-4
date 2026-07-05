@@ -14,18 +14,36 @@ This is a snapshot of `Firmware/WittyPi4/WittyPi4.ino` packaged in an Arduino-co
 
 ## Build settings — IMPORTANT, changed from Rev 14
 
-- **Board:** ATtiny841 (Internal 8 MHz) via [ATtinyCore](https://github.com/SpenceKonde/ATTinyCore)
-- **Wire Modes:** **Slave Only** (`wiremode=slave`) — required; Master Only fails to build
-- **millis()/micros():** **Disabled** (`millis=disabled`) — REQUIRED for Rev 15.
-  The sketch does not use `millis()` and `delay()` still works; disabling it
-  frees the flash needed for the Rev 15 fixes. The build is at 8188/8192
-  bytes (4 bytes free) — with millis enabled it does not fit.
-- **Programmer:** any USBasp / Arduino-as-ISP / similar
+Mirror the fleet's Arduino IDE board menu exactly
+([ATTinyCore](https://github.com/SpenceKonde/ATTinyCore)):
 
-arduino-cli equivalent:
+| Menu item | Required value |
+|---|---|
+| Board | ATtiny441/841 (No bootloader) |
+| Chip | ATtiny841 |
+| Clock Source (only set on bootload) | 8 MHz (internal, **Vcc < 4.5 V**) |
+| Pin Mapping | **Counterclockwise** (like old ATTinyCore and Rev. C boards) |
+| LTO | Enabled |
+| Wire Modes | **Slave Only** (Master Only fails to build) |
+| tinyNeoPixel port | Port A (default, unused) |
+| millis()/micros() | **Disabled (saves flash)** — REQUIRED for Rev 15 |
+| Save EEPROM (only set on bootload) | EEPROM retained |
+| B.O.D. Level (only set on bootload) | B.O.D. Enabled (2.7 V) |
+| B.O.D. Mode active / sleep | Enabled / Enabled |
+| Programmer | USBasp (ATTinyCore) or similar |
+
+Notes:
+- **Pin Mapping = Counterclockwise is critical.** The sketch's Arduino pin
+  numbers assume it; a Clockwise build drives the wrong physical pins.
+- **millis Disabled is required for flash fit** — the sketch uses no
+  `millis()` and `delay()` still works. The build is 8188/8192 bytes
+  (4 bytes free); with millis enabled it does not fit.
+
+arduino-cli equivalent (compile-verified with these exact options):
 ```bash
-arduino-cli compile --fqbn "ATTinyCore:avr:attinyx41:chip=841,clock=8internal,wiremode=slave,millis=disabled" WittyPi4_v15
+arduino-cli compile --fqbn "ATTinyCore:avr:attinyx41:chip=841,clock=8internal,pinmapping=old,LTO=enable,wiremode=slave,neopixelport=porta,millis=disabled" WittyPi4_v15
 ```
+(`clock=8internal` is the "Vcc < 4.5 V" variant; `8internal5v` is the > 4.5 V one.)
 
 Cache clearing tip (macOS, after edits):
 ```bash
