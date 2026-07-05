@@ -133,7 +133,10 @@ fi
 SRC_DIR="${WITTYPI_SRC:-$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/wittypi}"
 
 # scripts that carry the DST fix (v4.24)
-UPDATE_FILES="utilities.sh daemon.sh runScript.sh wittyPi.sh syncTime.sh checkInternet.sh"
+# v5.29: utilities.sh last - it carries SOFTWARE_VERSION, and copying it
+# first meant an interrupted update looked "already up to date" on rerun
+# while the other scripts were still the old version.
+UPDATE_FILES="daemon.sh runScript.sh wittyPi.sh syncTime.sh checkInternet.sh utilities.sh"
 
 # Sync $src_dir/*.wpi into $dst_dir/, exactly:
 #   - removes .wpi files on device not present in source

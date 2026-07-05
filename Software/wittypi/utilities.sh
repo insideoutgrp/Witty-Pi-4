@@ -130,6 +130,7 @@ if [ -z ${I2C_MC_ADDRESS+x} ]; then
   readonly REASON_POWER_CONNECTED='0x0a'
   readonly REASON_REBOOT='0x0b'
   readonly REASON_GUARANTEED_WAKE='0x0c'
+  readonly REASON_SYS_UP_TIMEOUT='0x0d'  # firmware Rev 15: boot watchdog power-cycled a hung boot
 
   # config file
   if [ "$(lsb_release -si)" == "Ubuntu" ]; then
@@ -142,7 +143,7 @@ if [ -z ${I2C_MC_ADDRESS+x} ]; then
 
   TIME_UNKNOWN=0
 
-  SOFTWARE_VERSION='5.28'
+  SOFTWARE_VERSION='5.29'
 
   readonly LOCAL_TZ='Europe/London'
 fi
@@ -240,13 +241,30 @@ rtc_has_bad_time()
 
 get_rtc_timestamp()
 {
-  sec=$(bcd2dec $((0x7F&$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_RTC_SECONDS))))
-  min=$(bcd2dec $(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_RTC_MINUTES))
-  hour=$(bcd2dec $(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_RTC_HOURS))
-  date=$(bcd2dec $(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_RTC_DAYS))
-  month=$(bcd2dec $(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_RTC_MONTHS))
-  year=$(bcd2dec $(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_RTC_YEARS))
-  echo $(date -u --date="$year-$month-$date $hour:$min:$sec" +%s)
+  # v5.29: validate every register read. A single failed read previously
+  # became field value 0 (or an arithmetic error) and the composed
+  # timestamp - hours wrong - was then written into the system clock by
+  # rtc_to_system on offline boots. Empty output = "RTC unreadable".
+  local rs=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_RTC_SECONDS)
+  local rm=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_RTC_MINUTES)
+  local rh=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_RTC_HOURS)
+  local rd=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_RTC_DAYS)
+  local rmo=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_RTC_MONTHS)
+  local ry=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_RTC_YEARS)
+  local r
+  for r in "$rs" "$rm" "$rh" "$rd" "$rmo" "$ry"; do
+    if ! [[ $r =~ ^0x[0-9a-fA-F]{2}$ ]]; then
+      echo ''
+      return 1
+    fi
+  done
+  sec=$(bcd2dec $((0x7F&$rs)))
+  min=$(bcd2dec $rm)
+  hour=$(bcd2dec $rh)
+  date=$(bcd2dec $rd)
+  month=$(bcd2dec $rmo)
+  year=$(bcd2dec $ry)
+  echo $(date -u --date="$year-$month-$date $hour:$min:$sec" +%s 2>/dev/null)
 }
 
 get_rtc_time()
@@ -286,60 +304,93 @@ hex2dec()
   printf "%d" $1
 }
 
-get_startup_time()
+# v5.29: alarm reads are validated - a failed i2c_read no longer silently
+# becomes "0" via bcd2dec (which previously let verify_alarm_in_future act
+# destructively on a phantom value). On any failed register read these
+# return an empty string; callers must treat that as "unknown", not "zero".
+_read_alarm_reg()
 {
-  sec=$(bcd2dec $(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_SECOND_ALARM1))
-  min=$(bcd2dec $(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_MINUTE_ALARM1))
-  hour=$(bcd2dec $(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_HOUR_ALARM1))
-  date=$(bcd2dec $(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_DAY_ALARM1))
-  printf '%02d %02d:%02d:%02d\n' $date $hour $min $sec
+  local v=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $1)
+  if [[ $v =~ ^0x[0-9a-fA-F]{2}$ ]]; then
+    bcd2dec $v
+  fi
 }
 
+get_startup_time()
+{
+  local sec=$(_read_alarm_reg $I2C_CONF_SECOND_ALARM1)
+  local min=$(_read_alarm_reg $I2C_CONF_MINUTE_ALARM1)
+  local hour=$(_read_alarm_reg $I2C_CONF_HOUR_ALARM1)
+  local date=$(_read_alarm_reg $I2C_CONF_DAY_ALARM1)
+  if [ -z "$sec" ] || [ -z "$min" ] || [ -z "$hour" ] || [ -z "$date" ]; then
+    echo ''
+  else
+    printf '%02d %02d:%02d:%02d\n' $date $hour $min $sec
+  fi
+}
+
+# v5.29: alarm registers are written DAY FIRST (day, hour, min, sec).
+# The firmware clears its ALARM*_TRIGGERED suppression flag on the FIRST
+# byte of a rewrite, and with the old sec-first order the register block
+# still encoded YESTERDAY's (in-window) alarm until the day byte landed -
+# a firmware tick in that window hard-cut power mid-boot. Writing the day
+# byte first makes every torn intermediate state future-dated for daily
+# schedules. (Firmware Rev 15 additionally pauses alarm evaluation during
+# rewrites; this ordering protects the Rev 14 fleet that can't be
+# reflashed remotely.)
 set_startup_time()
 {
-  sec=$(dec2bcd $4)
-  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_SECOND_ALARM1 $sec
-  min=$(dec2bcd $3)
-  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_MINUTE_ALARM1 $min
-  hour=$(dec2bcd $2)
-  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_HOUR_ALARM1 $hour
   date=$(dec2bcd $1)
   i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_DAY_ALARM1 $date
+  hour=$(dec2bcd $2)
+  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_HOUR_ALARM1 $hour
+  min=$(dec2bcd $3)
+  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_MINUTE_ALARM1 $min
+  sec=$(dec2bcd $4)
+  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_SECOND_ALARM1 $sec
 }
 
 clear_startup_time()
 {
-  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_SECOND_ALARM1 0x00
-  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_MINUTE_ALARM1 0x00
-  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_HOUR_ALARM1 0x00
+  # day first: a (0, old-time) hybrid is out of the firmware match window
   i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_DAY_ALARM1 0x00
+  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_HOUR_ALARM1 0x00
+  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_MINUTE_ALARM1 0x00
+  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_SECOND_ALARM1 0x00
 }
 
 get_shutdown_time()
 {
-  sec=$(bcd2dec $(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_SECOND_ALARM2))
-  min=$(bcd2dec $(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_MINUTE_ALARM2))
-  hour=$(bcd2dec $(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_HOUR_ALARM2))
-  date=$(bcd2dec $(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_DAY_ALARM2))
-  printf '%02d %02d:%02d:%02d\n' $date $hour $min $sec
+  local sec=$(_read_alarm_reg $I2C_CONF_SECOND_ALARM2)
+  local min=$(_read_alarm_reg $I2C_CONF_MINUTE_ALARM2)
+  local hour=$(_read_alarm_reg $I2C_CONF_HOUR_ALARM2)
+  local date=$(_read_alarm_reg $I2C_CONF_DAY_ALARM2)
+  if [ -z "$sec" ] || [ -z "$min" ] || [ -z "$hour" ] || [ -z "$date" ]; then
+    echo ''
+  else
+    printf '%02d %02d:%02d:%02d\n' $date $hour $min $sec
+  fi
 }
 
 set_shutdown_time()
 {
-  sec=$(dec2bcd $4)
-  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_SECOND_ALARM2 $sec
-  min=$(dec2bcd $3)
-  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_MINUTE_ALARM2 $min
-  hour=$(dec2bcd $2)
-  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_HOUR_ALARM2 $hour
+  # day first - see set_startup_time
   date=$(dec2bcd $1)
   i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_DAY_ALARM2 $date
+  hour=$(dec2bcd $2)
+  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_HOUR_ALARM2 $hour
+  min=$(dec2bcd $3)
+  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_MINUTE_ALARM2 $min
+  sec=$(dec2bcd $4)
+  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_SECOND_ALARM2 $sec
 }
 
 get_startup_time_local()
 {
   local raw=$(get_startup_time)
-  if [ "$raw" == "00 00:00:00" ]; then
+  if [ -z "$raw" ]; then
+    echo 'N/A'
+  elif [ "$raw" == "00 00:00:00" ]; then
     echo "$raw"
   else
     local utc_ts=$(date -u --date="$(date -u +%Y-%m-)$raw" +%s)
@@ -350,7 +401,9 @@ get_startup_time_local()
 get_shutdown_time_local()
 {
   local raw=$(get_shutdown_time)
-  if [ "$raw" == "00 00:00:00" ]; then
+  if [ -z "$raw" ]; then
+    echo 'N/A'
+  elif [ "$raw" == "00 00:00:00" ]; then
     echo "$raw"
   else
     local utc_ts=$(date -u --date="$(date -u +%Y-%m-)$raw" +%s)
@@ -360,10 +413,11 @@ get_shutdown_time_local()
 
 clear_shutdown_time()
 {
-  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_SECOND_ALARM2 0x00
-  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_MINUTE_ALARM2 0x00
-  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_HOUR_ALARM2 0x00
+  # day first: a (0, old-time) hybrid is out of the firmware match window
   i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_DAY_ALARM2 0x00
+  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_HOUR_ALARM2 0x00
+  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_MINUTE_ALARM2 0x00
+  i2c_write ${I2C_BUS} $I2C_MC_ADDRESS $I2C_CONF_SECOND_ALARM2 0x00
 }
 
 net_to_system()
@@ -382,8 +436,14 @@ net_to_system()
     sudo date -u -s @$net_ts >/dev/null
     sudo timedatectl set-ntp 1 >/dev/null 2>&1
     log '  Done :-)'
+    return 0
   else
     log '  Can not get legit network time.'
+    # v5.29: report failure so callers can SKIP system_to_rtc. Previously
+    # daemon.sh/syncTime.sh wrote the (possibly stale fake-hwclock) system
+    # time over a correct RTC whenever has_internet succeeded but the
+    # Date header was unusable - inverting the schedule until a good sync.
+    return 1
   fi
 }
 
@@ -413,6 +473,11 @@ rtc_to_system()
 {
   log '  Writing RTC time to system...'
   local rtc_ts=$(get_rtc_timestamp)
+  # v5.29: never write an unreadable RTC into the system clock
+  if [ -z "$rtc_ts" ]; then
+    log '  RTC is unreadable - keeping current system time.'
+    return 1
+  fi
   # v5.28 / v4.44: re-enable NTP after the manual set. Previously this
   # function called `timedatectl set-ntp 0` (so date -s wouldn't fight
   # timesyncd) but never re-enabled, leaving systemd-timesyncd
@@ -516,15 +581,24 @@ enable_default_on()
 
 verify_alarm_in_future()
 {
-  # Reads back an alarm register block and confirms the encoded time is in
-  # the future relative to current epoch.
-  #   - For STARTUP alarms in the past: writes a fallback "now + 1 hour"
-  #     so the device always has a guaranteed wake target.
-  #   - For SHUTDOWN alarms in the past: CLEARS the alarm (zeros). With
-  #     the widened firmware match window, a past shutdown alarm would
-  #     re-fire immediately and cause a reboot loop on devices configured
-  #     for auto-recovery (DEFAULT_ON=1 + RECOVERY_VOLTAGE). Clearing it
-  #     means no scheduled shutdown until the daemon writes a new one.
+  # v5.29: rewritten to mirror the firmware's actual matching semantics.
+  # The firmware compares day-of-month-relative timestamps with a backward
+  # 86400s window; the old "alarm-day < today means next month" heuristic
+  # classified yesterday's stale alarm (the common overnight case) as
+  # next-month-future and never caught it, while the epoch check
+  # mis-handled cross-month alarms.
+  #
+  # Policy per kind:
+  #   STARTUP: armed-in-past-window, implausibly far future (>8 days -
+  #     schedules never write more than ~7 days ahead), or zero -> write
+  #     fallback "now + 1 hour" so the device always has a wake target.
+  #   SHUTDOWN: LOG ONLY - never clear. The ALARM2_TRIGGERED suppression
+  #     set at wake already prevents a stale re-fire, and runScript.sh
+  #     rewrites alarm2 right after the daemon anyway. Clearing here
+  #     (the old behaviour) created a rewrite-from-zeros torn state that
+  #     could race the firmware into a mid-boot power cut on Rev 14.
+  #   UNREADABLE (any register read failed): LOG ONLY for both kinds -
+  #     never take destructive action on a value we couldn't read.
   # $1 = "startup" or "shutdown"
   local kind=$1
   local raw
@@ -532,6 +606,11 @@ verify_alarm_in_future()
     raw=$(get_startup_time)
   else
     raw=$(get_shutdown_time)
+  fi
+
+  if [ -z "$raw" ]; then
+    log "WARN: could not read $kind alarm registers - leaving them untouched."
+    return
   fi
 
   if [ "$raw" = "00 00:00:00" ]; then
@@ -544,34 +623,36 @@ verify_alarm_in_future()
     return
   fi
 
-  # Reconstruct UTC epoch from the raw "DD HH:MM:SS" (alarm registers are
-  # UTC since v4.24). Use current UTC month/year as context.
-  local alarm_epoch=$(date -u --date="$(date -u +%Y-%m-)$raw" +%s 2>/dev/null)
+  local alarm_epoch=$(_parse_alarm_to_epoch "$raw")
   if [ -z "$alarm_epoch" ]; then
-    log "WARN: could not parse $kind alarm '$raw' - resetting."
-    if [ "$kind" = "startup" ]; then
-      apply_fallback_alarm "startup"
-    else
-      clear_shutdown_time
-    fi
+    log "WARN: could not parse $kind alarm '$raw' - leaving it untouched."
     return
   fi
 
   local now=$(current_timestamp)
-  # if alarm-day < today, it means the alarm is for next month; add a month
-  local alarm_day=${raw:0:2}
-  local today_day=$(date -u +%d)
-  if [ $((10#$alarm_day)) -lt $((10#$today_day)) ]; then
-    alarm_epoch=$((alarm_epoch + 86400 * 31))   # approx, fine for the in-future check
-  fi
+  local overdue=$((now - alarm_epoch))
 
-  if [ $alarm_epoch -le $((now + 30)) ]; then
+  if [ $overdue -ge -30 ] && [ $overdue -lt 86400 ]; then
+    # armed in the firmware's past-window (or within 30s of firing)
     if [ "$kind" = "startup" ]; then
       log "WARN: startup alarm '$raw' is not safely in the future - applying fallback (now + 1 hour)."
       apply_fallback_alarm "startup"
     else
-      log "WARN: shutdown alarm '$raw' is in the past - CLEARING to prevent reboot loop."
-      clear_shutdown_time
+      log "NOTE: shutdown alarm '$raw' is stale (${overdue}s past); suppressed by firmware flag, runScript will rewrite it."
+    fi
+  elif [ $overdue -lt $((-8 * 86400)) ]; then
+    # more than 8 days in the future - no schedule writes that far ahead
+    if [ "$kind" = "startup" ]; then
+      log "WARN: startup alarm '$raw' is implausibly far in the future - applying fallback (now + 1 hour)."
+      apply_fallback_alarm "startup"
+    else
+      log "NOTE: shutdown alarm '$raw' looks implausible; leaving for runScript to rewrite."
+    fi
+  elif [ $overdue -ge 86400 ]; then
+    # past but outside the firmware's match window - inert
+    if [ "$kind" = "startup" ]; then
+      log "WARN: startup alarm '$raw' is stale beyond the match window - applying fallback (now + 1 hour)."
+      apply_fallback_alarm "startup"
     fi
   fi
 }
@@ -649,7 +730,11 @@ i2c_read()
   else
     retry=$(( $retry + 1 ))
     if [ $retry -eq 4 ] ; then
-      log "I2C read $1 $2 $3 failed (result=$result), and no more retry."
+      # v5.29: log to FILE only. log() echoes to stdout, and callers
+      # capture this function with $(...) - the error sentence became the
+      # "value", word-split, and bcd2dec arithmetic silently turned it
+      # into 0. A failed read now yields an empty string.
+      log2file "I2C read $1 $2 $3 failed (result=$result), and no more retry."
     else
       sleep 1
       log2file "I2C read $1 $2 $3 failed (result=$result), retrying $retry ..."
@@ -734,22 +819,40 @@ schedule_script_interrupted()
 
 _parse_alarm_to_epoch()
 {
-  # Convert a raw alarm "DD HH:MM:SS" (UTC) to an absolute UTC epoch,
-  # handling the month-boundary case: if the alarm's day is less than
-  # today's day, the alarm refers to NEXT month (e.g. today=2026-06-30,
-  # alarm=01 → it means 2026-07-01, not 2026-06-01).
-  # Returns empty string if parse fails.
+  # v5.29: convert a raw alarm "DD HH:MM:SS" (UTC) to the epoch of its
+  # NEAREST real occurrence, mirroring the firmware's day-of-month-
+  # relative matching. The old version assumed alarm-day < today always
+  # meant "next month", which classified yesterday's alarm (the common
+  # overnight case) as ~30 days in the future.
+  #
+  # Method: compute the firmware-style signed offset
+  #   overdue = (today - alarm_day)*86400 + (now_tod - alarm_tod)
+  # then resolve month wrap-around: schedules never write alarms more
+  # than ~7 days ahead, so an "overdue" beyond +/-8 days means the alarm
+  # belongs to the adjacent month. Returns empty string if parse fails.
   local raw="$1"
-  local alarm_day=${raw:0:2}
-  local today_day=$(date -u +%d)
-  local ym
-  if [ $((10#$alarm_day)) -lt $((10#$today_day)) ]; then
-    # alarm is for next month
-    ym=$(date -u -d "$(date -u +%Y-%m-01) +1 month" +%Y-%m-)
-  else
-    ym=$(date -u +%Y-%m-)
+  if ! [[ $raw =~ ^([0-9]{2})\ ([0-9]{2}):([0-9]{2}):([0-9]{2})$ ]]; then
+    echo ''
+    return 1
   fi
-  date -u --date="${ym}${raw}" +%s 2>/dev/null
+  local dom=$((10#${BASH_REMATCH[1]}))
+  local tod=$((10#${BASH_REMATCH[2]}*3600 + 10#${BASH_REMATCH[3]}*60 + 10#${BASH_REMATCH[4]}))
+  local now=$(current_timestamp)
+  local today=$((10#$(date -u -d @$now +%d)))
+  local now_tod=$(( 10#$(date -u -d @$now +%H)*3600 + 10#$(date -u -d @$now +%M)*60 + 10#$(date -u -d @$now +%S) ))
+  local overdue=$(( (today - dom)*86400 + now_tod - tod ))
+  if [ $overdue -lt $((-8 * 86400)) ]; then
+    # alarm day is near month end while today is near month start:
+    # it belongs to the PREVIOUS month - shift by that month's length
+    local dprev=$((10#$(date -u -d "$(date -u -d @$now +%Y-%m-01) -1 day" +%d)))
+    overdue=$((overdue + dprev*86400))
+  elif [ $overdue -gt $((8 * 86400)) ]; then
+    # today is near month end while the alarm day is small: the alarm
+    # is early NEXT month - shift by the current month's length
+    local dcur=$((10#$(date -u -d "$(date -u -d @$now +%Y-%m-01) +1 month -1 day" +%d)))
+    overdue=$((overdue - dcur*86400))
+  fi
+  echo $((now - overdue))
 }
 
 get_power_mode()
@@ -830,6 +933,10 @@ check_sys_and_rtc_time()
 {
   local rtc_ts=$(get_rtc_timestamp)
   local sys_ts=$(get_sys_timestamp)
+  if [ -z "$rtc_ts" ]; then
+    echo '[Warning] Could not read RTC time for the sync check.'
+    return
+  fi
   local delta=$((rtc_ts-sys_ts))
   if [ "${delta#-}" -gt 10 ]; then
     local rtc_t=$(TZ=$LOCAL_TZ date +'%Y-%m-%d %H:%M:%S %Z' -d @$rtc_ts)

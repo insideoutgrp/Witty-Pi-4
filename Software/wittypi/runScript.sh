@@ -22,9 +22,25 @@ while [[ "$(date +%Y)" == *"1969"* ]] || [[ "$(date +%Y)" == *"1970"* ]]; do
   sleep 1
 done
 
+# v5.29: serialise our alarm-register writes with the cron I2C jobs.
+# A syncTime/checkInternet tick interleaving with a 4-register alarm
+# write produced retry storms and torn alarm values. Generous timeout
+# (the daemon may briefly hold the lock at boot); on timeout continue -
+# a torn write is recoverable, a never-written alarm is worse.
+exec 9>/var/lock/wittypi.i2c.lock
+if ! flock -w 120 9 ; then
+  log 'runScript: could not acquire I2C lock within 120s - continuing without it.'
+fi
+
 # get current timestamp
 cur_time=$(current_timestamp)
 echo "--------------- $(TZ=$LOCAL_TZ date -d @$cur_time +'%Y-%m-%d %H:%M:%S') ---------------"
+
+# v5.29: remember why this boot happened - a Guaranteed Wake landing in
+# the middle of an OFF window gets special handling after scheduling
+# (see the return-to-sleep block below).
+wake_reason=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_ACTION_REASON)
+current_on_start=''
 
 extract_timestamp()
 {
@@ -196,6 +212,10 @@ if [ -f $schedule_file ]; then
         if [ $((effective_ct + 60 >= cur_time)) == '1' ] && ([ $found_states == 1 ] || [[ ${states[$index]} == ON* ]]) ; then
           found_states=$((found_states+1))
           if [[ ${states[$index]} == ON* ]]; then
+            if [ -z "$current_on_start" ]; then
+              # start of the ON segment this boundary belongs to (raw epoch)
+              current_on_start=$((check_time-duration))
+            fi
             if [[ ${states[$index]} == *WAIT ]]; then
               log 'Skip scheduling next shutdown, which should be done externally.'
             else
@@ -235,6 +255,15 @@ if [ -f $schedule_file ]; then
               check_time=$end     # skip all remaining cycles
             else
               script_duration=$((check_time-begin))
+              # v5.29: guard against zero cycle duration (malformed
+              # durations, e.g. lowercase units, parse to 0). The modulo
+              # below would be a division by zero, killing this script
+              # with NO alarms written and no fallback applied.
+              if [ $script_duration -le 0 ]; then
+                log 'ERROR: schedule cycle duration is zero (bad ON/OFF durations?) - applying fallback wake.'
+                apply_fallback_alarm "startup"
+                break
+              fi
               skip=$((cur_time-check_time))
               skip=$((skip-skip%script_duration))
               check_time=$((check_time+skip))  # skip some useless cycles
@@ -250,6 +279,40 @@ if [ -f $schedule_file ]; then
       # stale alarms left from interrupted runs.
       verify_alarm_in_future "startup"
       verify_alarm_in_future "shutdown"
+
+      # v5.29: Guaranteed-Wake return-to-sleep. If the 24h backstop fired
+      # in the middle of a scheduled OFF window, the normal scheduling
+      # above keeps the device powered through the remainder of the OFF
+      # window plus the entire next ON window (up to ~48h unscheduled
+      # uptime on weekend-off schedules - a battery killer). Instead:
+      # sleep again in 5 minutes (enough for the boot-time time sync and
+      # log flush) and wake at the true start of the next ON period.
+      # Applies only to daemon-spawned runs ($2 set) woken by the
+      # Guaranteed Wake reason - button and power-connected wakes keep
+      # the stay-up behaviour (an operator may be present).
+      if [ ! -z "$2" ] && [ "$wake_reason" == "$REASON_GUARANTEED_WAKE" ] && [ -n "$current_on_start" ]; then
+        eff_on_start=$current_on_start
+        if [ $script_duration -gt 0 ] && [ $((script_duration % 86400)) -eq 0 ]; then
+          eff_on_start=$(dst_correct $begin $current_on_start)
+        fi
+        now_ts=$(current_timestamp)
+        if [ $eff_on_start -gt $((now_ts + 600)) ]; then
+          log 'Guaranteed Wake landed inside an OFF window - returning to sleep in 5 minutes.'
+          d=$(date -u -d "@$eff_on_start" +"%d")
+          h=$(date -u -d "@$eff_on_start" +"%H")
+          m=$(date -u -d "@$eff_on_start" +"%M")
+          s=$(date -u -d "@$eff_on_start" +"%S")
+          log "Schedule next startup at:  $(TZ=$LOCAL_TZ date -d @$eff_on_start +'%Y-%m-%d %H:%M:%S %Z')"
+          set_startup_time $d $h $m $s
+          off_ts=$((now_ts + 300))
+          d=$(date -u -d "@$off_ts" +"%d")
+          h=$(date -u -d "@$off_ts" +"%H")
+          m=$(date -u -d "@$off_ts" +"%M")
+          s=$(date -u -d "@$off_ts" +"%S")
+          log "Schedule next shutdown at: $(TZ=$LOCAL_TZ date -d @$off_ts +'%Y-%m-%d %H:%M:%S %Z')"
+          set_shutdown_time $d $h $m $s
+        fi
+      fi
     fi
   fi
 else

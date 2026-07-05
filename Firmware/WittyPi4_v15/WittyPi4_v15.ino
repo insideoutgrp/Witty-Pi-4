@@ -1,9 +1,55 @@
 /**
  * Firmware for WittyPi 4
  *
- * Revision: 14
+ * Revision: 15
  *
  * Changelog:
+ *   Rev 15 (2026-07-05) - downtime-hardening release (I2C_FW_REVISION 0x0F):
+ *     - Fix torn-alarm-rewrite race: any write to an alarm register now
+ *       sets a 5-second alarmWriteHold; processAlarmIfNeeded() skips
+ *       alarm matching while the hold is active. Previously the
+ *       per-byte ALARM*_TRIGGERED clear in receiveEvent un-suppressed
+ *       yesterday's stale (still in-window) alarm2 while the daemon's
+ *       4-transaction rewrite was mid-flight; a WDT tick in that window
+ *       hard-cut power mid-boot (observed as boot flapping).
+ *     - SYS_UP boot watchdog: if the Pi is powered but never signals
+ *       SYS_UP within 30 minutes, cut power and sleep (reason 13 =
+ *       REASON_SYS_UP_TIMEOUT). The stale in-window alarm1 re-wakes it
+ *       for a retry. Previously a Pi that hung before the daemon ran
+ *       kept power on forever with every backstop blind (guaranteed
+ *       wake counter only ticks while asleep).
+ *     - Fix lost-wake race in sleep(): flag-clears and wakeupByWatchdog
+ *       are now set atomically inside cli()/sei(). Previously a WDT
+ *       tick between the flag-clear and 'wakeupByWatchdog = true'
+ *       consumed the alarm1 match and then had its wake request
+ *       overwritten - device slept through its alarm with the
+ *       TRIGGERED flag stuck at 1.
+ *     - Guaranteed Wake floor: reg 49 is forced to 24 (hours) at boot
+ *       when 0 or 255. Fresh EEPROM previously synced to 0, shipping
+ *       the 24h backstop disabled until the daemon's first run.
+ *     - I2C_TIMEOUT=20ms on the internal software I2C master. It
+ *       previously compiled the no-timeout spin: a wedged RTC bus
+ *       would hang the WDT ISR forever with the Pi's power off
+ *       (permanent brick - no WDE reset backstop exists).
+ *     - Reboot detection re-samples TXD: up to 3 extra POWER_CUT_DELAY
+ *       periods (~28s total) before concluding the Pi is really off.
+ *       Previously a single sample of the floating TXD line 7s after
+ *       shutdown made every OS reboot a coin flip; a slow reboot got
+ *       its power cut and slept until the next day's alarm.
+ *     - Month-boundary alarm wrap: overdue values around -1 month are
+ *       re-normalized using the previous month's real length, so an
+ *       alarm missed late on the last day of a month still fires
+ *       within its 24h window instead of deferring ~1 month.
+ *     - delay() overflow fix: DEFAULT_ON_DELAY * 1000 now computed in
+ *       unsigned long. Values 33-65s previously overflowed int16 into
+ *       a ~49.7-day boot delay (brick until power cycle).
+ *     - EEPROM wear fix: telemetry registers 1-6 (Vin/Vout/Iout) are
+ *       no longer persisted to EEPROM. ADC jitter was rewriting those
+ *       cells on nearly every WDT tick during sleep (100k-cycle spec
+ *       exceeded within weeks).
+ *     - alarm1Delayed is reset in powerOn() and on alarm1 register
+ *       writes. A stale value previously caused a spurious wake 3s
+ *       after the next scheduled shutdown ("mystery wakes").
  *   Rev 14 patch (2026-05-28e):
  *     - Bug fix: turnOffFromTXD was sticky after a reboot detection in
  *       the Timer1 ISR. The reboot branch sets turningOff = false and
@@ -123,6 +169,12 @@
 #define SDA_PORT PORTB
 #define SCL_PIN 0
 #define SCL_PORT PORTA
+// Rev15: bound the internal-bus SCL-stretch wait. Without this the library
+// compiles an unconditional spin (see SoftIICMaster.h `#if I2C_TIMEOUT <= 0`);
+// a wedged RTC bus would hang the WDT ISR forever with the Pi's power off.
+// All call sites already tolerate a failed read (returns garbage for one
+// tick; alarm matching absorbs it via the 86400s window).
+#define I2C_TIMEOUT 20
 #include "SoftWireMaster.h"
 
 #include <WireS.h>
@@ -266,6 +318,7 @@
 #define REASON_POWER_CONNECTED    10
 #define REASON_REBOOT             11
 #define REASON_GUARANTEED_WAKE    12
+#define REASON_SYS_UP_TIMEOUT     13  // Rev15: powered but no SYS_UP within 30min - power-cycled to retry boot
 
 
 volatile byte i2cReg[I2C_REG_COUNT];
@@ -318,6 +371,26 @@ volatile byte lastSystemUp = 0;
 volatile boolean turnOffFromTXD = false;
 
 volatile unsigned long guaranteedWakeCounter = 0;
+
+// Rev15: while > 0, processAlarmIfNeeded() skips alarm matching. Set to 5
+// (seconds) by receiveEvent on every alarm-register write, so the WDT ISR
+// never evaluates a half-written (torn) alarm block mid-rewrite. Refreshed
+// per byte; the daemon's 4-transaction rewrite completes well inside it.
+volatile byte alarmWriteHold = 0;
+
+// Rev15: SYS_UP boot watchdog. Counts seconds while the Pi is powered but
+// has not yet signalled SYS_UP. At SYS_UP_TIMEOUT_SECS the firmware cuts
+// power and sleeps; the still-in-window alarm1 (or DEFAULT_ON on the next
+// power event) re-wakes the Pi for a retry. Without this, a Pi that hangs
+// before the daemon runs keeps power on forever and every backstop is
+// blind (the guaranteed wake counter only ticks while asleep).
+#define SYS_UP_TIMEOUT_SECS 1800
+volatile unsigned int sysUpWatchdog = 0;
+
+// Rev15: reboot-detection grace. The single TXD sample 7s after shutdown
+// was a coin flip on a floating line; we now re-sample for up to 3 more
+// POWER_CUT_DELAY periods before concluding the Pi is really off.
+volatile byte rebootGraceCount = 0;
 
 volatile byte lowVoltageCacheInteger = 0;
 
@@ -375,7 +448,12 @@ void setup() {
   // power on or sleep
   bool defaultOn = (i2cReg[I2C_CONF_DEFAULT_ON] == 1);
   if (defaultOn) {
-    delay(i2cReg[I2C_CONF_DEFAULT_ON_DELAY] * 1000);  // delay if the value is configured
+    // Rev15: loop 1s chunks instead of multiplying. byte * int is 16-bit
+    // on AVR; the old `delay(reg * 1000)` overflowed for a configured
+    // delay of 33-65s into a ~49.7-day dead boot.
+    for (byte dsec = i2cReg[I2C_CONF_DEFAULT_ON_DELAY]; dsec > 0; dsec --) {
+      delay(1000);
+    }
     updateRegister(I2C_ACTION_REASON, REASON_POWER_CONNECTED);
     // Rev14 patch (2026-05-28d): same stale-alarm2 guard as alarm1 wake -
     // if the EEPROM-resident alarm2 time falls within the 86400s match
@@ -404,7 +482,7 @@ void loop() {
 // initialize the registers and synchronize with EEPROM
 void initializeRegisters() {
   i2cReg[I2C_ID] = 0x26;
-  i2cReg[I2C_FW_REVISION] = 0x0E;
+  i2cReg[I2C_FW_REVISION] = 0x0F;
 
   i2cReg[I2C_CONF_ADDRESS] = 0x08;
 
@@ -449,6 +527,21 @@ void initializeRegisters() {
   // policy: the device will auto-wake on power applied, period.
   i2cReg[I2C_CONF_DEFAULT_ON] = 1;
   EEPROM.update(I2C_CONF_DEFAULT_ON, 1);
+
+  // Rev15: enforce a Guaranteed Wake floor, same one-way field policy as
+  // DEFAULT_ON above. Fresh EEPROM (0xFF cells) synced reg 49 to the
+  // zero-initialised RAM value, shipping the 24h backstop DISABLED until
+  // the Pi daemon's first successful run - exactly when a new device is
+  // most exposed. 24 = 0x18 = every 24 hours (bit7=0 -> hours), matching
+  // what daemon.sh writes. 255 is also normalised (it would be re-read
+  // as the EEPROM erase sentinel on the next boot and become 0).
+  // (Note: 255 can't appear here - the sync loop above converts an erased
+  // 0xFF cell into the zero-initialised RAM value, so 0 is the only
+  // disabled state to normalise.)
+  if (i2cReg[I2C_CONF_GUARANTEED_WAKE] == 0) {
+    i2cReg[I2C_CONF_GUARANTEED_WAKE] = 24;
+    EEPROM.update(I2C_CONF_GUARANTEED_WAKE, 24);
+  }
 
   // Rev13: only push RTC offset to PCF85063 at boot. LM75B threshold init
   // removed (temperature-action feature is no-op since Rev 12, fully
@@ -516,14 +609,23 @@ void sleep() {
   // already set, so the second match doesn't re-fire. The Pi-side
   // verify_alarm_in_future on every daemon boot is an additional
   // layer for stale past alarms.)
+  // Rev15: the flag-clears and the wakeupByWatchdog arm must be atomic
+  // with respect to the WDT ISR. Previously a WDT tick landing between
+  // the flag-clear and 'wakeupByWatchdog = true' (a ~7ms window - two
+  // EEPROM writes) could match an in-window alarm1, request the wake
+  // (wakeupByWatchdog = false), and then have that request overwritten
+  // - leaving ALARM1_TRIGGERED stuck at 1 with the device asleep until
+  // Guaranteed Wake. cli/sei makes the whole entry sequence one unit;
+  // a pending WDT tick fires right after sei() and is evaluated with
+  // consistent state.
+  cli();
   updateRegister(I2C_ALARM1_TRIGGERED, 0);
   updateRegister(I2C_ALARM2_TRIGGERED, 0);
 
   GIMSK = _BV (PCIE1);                    // only enable interrupt for switch (PCINT9)
   PCMSK1 = _BV (PCINT9);
-  sei();
-
   wakeupByWatchdog = true;
+  sei();
   do {
     sleep_cpu();                          // sleep
     if (wakeupByWatchdog) {               // wake up by watch dog
@@ -608,6 +710,9 @@ void powerOn() {
   powerIsOn = true;
   guaranteedWakeCounter = 0;
   skipLowVoltageDetectCount = 0;
+  // Rev15: fresh session - no stale delayed-alarm1 or boot-watchdog state
+  alarm1Delayed = 0;
+  sysUpWatchdog = 0;
   digitalWrite(PIN_CTRL, 1);
   updatePowerMode();
 }
@@ -757,11 +862,24 @@ void receiveEvent(int count) {
     } else if (i2cIndex >= I2C_CONF_ADDRESS && i2cIndex < I2C_REG_COUNT) {  // non-virtual, writable i2c register
       if (TinyWireS.available()) {
         // clear alarm triggered flag if alam is changed
+        // Rev15: each branch also arms alarmWriteHold - the Pi writes each
+        // alarm as 4 separate transactions, and clearing TRIGGERED at the
+        // first byte re-armed the OLD (still in-window) alarm value for
+        // the duration of the rewrite; a WDT tick landing in that window
+        // hard-cut power mid-boot. The hold pauses alarm evaluation,
+        // refreshed per byte, expiring ~5s after the last one - far
+        // longer than the rewrite takes.
         if (i2cIndex >= I2C_CONF_SECOND_ALARM1 && i2cIndex <= I2C_CONF_WEEKDAY_ALARM1) {
           updateRegister(I2C_ALARM1_TRIGGERED, 0);
+          // a rewritten alarm1 invalidates any pending delayed-start state
+          // (stale alarm1Delayed caused a spurious wake 3s after the next
+          // scheduled shutdown)
+          alarm1Delayed = 0;
+          alarmWriteHold = 5;
         }
         if (i2cIndex >= I2C_CONF_SECOND_ALARM2 && i2cIndex <= I2C_CONF_WEEKDAY_ALARM2) {
           updateRegister(I2C_ALARM2_TRIGGERED, 0);
+          alarmWriteHold = 5;
         }
 
         // update the register value
@@ -832,6 +950,25 @@ ISR (WDT_vect) {
     ledOff();
   }
 
+  // Rev15: SYS_UP boot watchdog. If the Pi has been powered for
+  // SYS_UP_TIMEOUT_SECS without ever signalling SYS_UP, it hung before
+  // the daemon could run - cut power and sleep so the still-in-window
+  // alarm1 (or the next power event) retries the boot. Counted here,
+  // before the internalBusBusy early-return, so busy ticks still count.
+  // Normal boots reset this via PCINT1's SYS_UP branch within ~60s.
+  // (Counter resets live in powerOn() and PCINT1's SYS_UP branch - it can
+  // only tick inside one powered-but-not-up phase, so no else-reset needed.)
+  if (powerIsOn && !systemIsUp && !turningOff) {
+    sysUpWatchdog ++;
+    if (sysUpWatchdog >= SYS_UP_TIMEOUT_SECS) {
+      sysUpWatchdog = 0;
+      updateRegister(I2C_ACTION_REASON, REASON_SYS_UP_TIMEOUT);
+      turnOffFromTXD = false;
+      turningOff = true;
+      powerCutDelay = 0; TCNT1 = 65534;
+    }
+  }
+
   // Rev13: if the Pi is mid-transaction on the internal softWireMaster
   // (via receiveEvent/requestEvent), skip RTC/LM75B touches this tick.
   // Bus collisions otherwise corrupt RTC reads and produce garbage time
@@ -893,6 +1030,7 @@ ISR (PCINT0_vect) {
      systemIsUp = false;
      turningOff = true;
      turnOffFromTXD = true;
+     rebootGraceCount = 0;   // Rev15: fresh grace budget for this shutdown
      ledOff(); // turn off the white LED
      TCNT1 = getPowerCutPreloadTimer(true);
     }
@@ -934,6 +1072,7 @@ ISR (PCINT1_vect) {
       // clear the low-voltage shutdown flag when sys_up signal arrives
       updateRegister(I2C_LV_SHUTDOWN, 0);
       systemIsUp = true;
+      sysUpWatchdog = 0;   // Rev15: Pi booted - disarm the boot watchdog
       lastSystemUp = 1;
     }
     // if guard failed (LED on), don't update lastSystemUp — retry on next PCINT trigger
@@ -962,7 +1101,19 @@ ISR (TIM1_OVF_vect) {
         turnOffFromTXD = false;
         updateRegister(I2C_ACTION_REASON, REASON_REBOOT);
         ledOn();
+      } else if (turnOffFromTXD && rebootGraceCount < 3) {
+        // Rev15: TXD still LOW - but during a reboot the line floats
+        // through the bootloader/GPU phase and can easily still be LOW
+        // at the first sample. Give it up to 3 more POWER_CUT_DELAY
+        // periods (~28s total with the 7s default) before deciding this
+        // is a real shutdown. A single-sample miss here previously cut
+        // power mid-reboot and the device slept until the next day's
+        // alarm1 - triggered most often by checkInternet.sh's own
+        // recovery reboot.
+        rebootGraceCount ++;
+        // TCNT1 was already reloaded above; just skip the cut this round.
       } else {  // cut the power and defer sleep to loop()
+        // (rebootGraceCount re-arms at the next PCINT0 TXD shutdown)
         cutPower();
         // Rev13: do not call sleep() from inside this ISR. Sleep is a
         // long-running call that nests WDT/PCINT ISRs on top of the
@@ -982,6 +1133,13 @@ ISR (TIM1_OVF_vect) {
 // update I2C register and save to EEPROM
 void updateRegister(byte index, byte value) {
   i2cReg[index] = value;
+  // Rev15: never persist the live telemetry registers (Vin/Vout/Iout,
+  // regs 1-6). ADC jitter changes them on nearly every measurement, so
+  // EEPROM.update was rewriting those cells on almost every WDT tick
+  // during sleep - exceeding the 100k-cycle endurance spec in weeks.
+  if (index >= I2C_VOLTAGE_IN_I && index <= I2C_CURRENT_OUT_D) {
+    return;
+  }
   if (index < I2C_REG_COUNT) {
     EEPROM.update(index, value);
   }
@@ -1025,8 +1183,24 @@ boolean canTriggerAlarm() {
 }
 
 
+// (Rev15 note: a month-boundary wrap fix for the day-of-month-relative
+// overdue calculation was prototyped but dropped for flash budget - the
+// ATtiny841 is at 99% capacity. The residual gap: an alarm missed ON the
+// last day of a month appears ~1 month in the future the next morning
+// and won't catch up via the 86400s window. Bounded to one lost day by
+// the Guaranteed Wake floor enforced at boot since Rev15.)
+
+
 // process the alarm from RTC, if exists
 void processAlarmIfNeeded() {
+  // Rev15: skip alarm evaluation entirely while an alarm block rewrite is
+  // in flight (see alarmWriteHold). Costs at most ~5s of match latency,
+  // absorbed by the 86400s window.
+  if (alarmWriteHold > 0) {
+    alarmWriteHold --;
+    return;
+  }
+
   // get current time from RTC
   byte seconds = bcd2dec(readFromDevice(ADDRESS_RTC, I2C_RTC_SECONDS - I2C_RTC_CTRL1) & 0x7F);
   byte minutes = bcd2dec(readFromDevice(ADDRESS_RTC, I2C_RTC_MINUTES - I2C_RTC_CTRL1));
