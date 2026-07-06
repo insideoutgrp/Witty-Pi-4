@@ -27,8 +27,20 @@ done
 # write produced retry storms and torn alarm values. Generous timeout
 # (the daemon may briefly hold the lock at boot); on timeout continue -
 # a torn write is recoverable, a never-written alarm is worse.
-exec 9>/var/lock/wittypi.i2c.lock
-if ! flock -w 120 9 ; then
+# v5.30: the lock is shared between root (daemon/cron) and the
+# interactive user running wittyPi.sh. Root creates it world-writable;
+# if it already exists root-owned without write access for us, fall
+# back to a read-only fd - flock(2) takes an exclusive lock on a read
+# fd just as well. (Previously the failed exec printed "Permission
+# denied" + "flock: Bad file descriptor" and skipped locking.)
+LOCK=/var/lock/wittypi.i2c.lock
+touch "$LOCK" 2>/dev/null && chmod 666 "$LOCK" 2>/dev/null
+if [ -w "$LOCK" ]; then
+  exec 9>"$LOCK"
+elif [ -r "$LOCK" ]; then
+  exec 9<"$LOCK"
+fi
+if ! flock -w 120 9 2>/dev/null; then
   log 'runScript: could not acquire I2C lock within 120s - continuing without it.'
 fi
 

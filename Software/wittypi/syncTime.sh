@@ -22,10 +22,17 @@ fi
 
 # Serialise with any other I2C-touching cron job (checkInternet.sh) so we
 # never have two scripts hitting the Witty Pi I2C bus simultaneously.
+# v5.30: world-writable lock shared with the interactive wittyPi.sh menu;
+# read-fd fallback for a pre-existing root-owned 644 file.
 LOCK=/var/lock/wittypi.i2c.lock
-exec 9>"$LOCK"
-if ! flock -n 9 ; then
-  log 'Time sync: another wittypi cron job is using the I2C bus, skipping this tick.'
+touch "$LOCK" 2>/dev/null && chmod 666 "$LOCK" 2>/dev/null
+if [ -w "$LOCK" ]; then
+  exec 9>"$LOCK"
+elif [ -r "$LOCK" ]; then
+  exec 9<"$LOCK"
+fi
+if ! flock -n 9 2>/dev/null; then
+  log 'Time sync: another wittypi job is using the I2C bus, skipping this tick.'
   exit 0
 fi
 

@@ -49,8 +49,17 @@ fi
 # Their 60s uptime gate doesn't cover slow boots - the sync curls below
 # alone can push our register writes past uptime 60-100s, exactly when a
 # cron tick lands. Bounded wait so a stuck lock can never stall the boot.
-exec 9>/var/lock/wittypi.i2c.lock
-if ! flock -w 30 9 ; then
+# v5.30: create world-writable so the interactive wittyPi.sh menu (run as
+# a normal user) can also lock it; fall back to a read fd when an old
+# root-owned 644 file is in the way - flock works on read fds too.
+LOCK=/var/lock/wittypi.i2c.lock
+touch "$LOCK" 2>/dev/null && chmod 666 "$LOCK" 2>/dev/null
+if [ -w "$LOCK" ]; then
+  exec 9>"$LOCK"
+elif [ -r "$LOCK" ]; then
+  exec 9<"$LOCK"
+fi
+if ! flock -w 30 9 2>/dev/null; then
   log 'Could not acquire I2C lock within 30s - continuing without it.'
 fi
 
