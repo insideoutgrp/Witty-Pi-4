@@ -24,10 +24,17 @@ fi
 
 # Serialise with syncTime.sh so we never have two scripts hitting the
 # Witty Pi I2C bus simultaneously.
+# v4.46: world-writable lock shared with the interactive wittyPi.sh menu;
+# read-fd fallback for a pre-existing root-owned 644 file.
 LOCK=/var/lock/wittypi.i2c.lock
-exec 9>"$LOCK"
-if ! flock -n 9 ; then
-  log 'Internet check: another wittypi cron job is using the I2C bus, deferring.'
+touch "$LOCK" 2>/dev/null && chmod 666 "$LOCK" 2>/dev/null
+if [ -w "$LOCK" ]; then
+  exec 9>"$LOCK"
+elif [ -r "$LOCK" ]; then
+  exec 9<"$LOCK"
+fi
+if ! flock -n 9 2>/dev/null; then
+  log 'Internet check: another wittypi job is using the I2C bus, deferring.'
   exit 0
 fi
 
