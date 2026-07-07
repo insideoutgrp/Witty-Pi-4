@@ -115,7 +115,12 @@ if [ -z ${I2C_MC_ADDRESS+x} ]; then
   readonly CHRG_PIN=5    # input to detect charging status
   readonly STDBY_PIN=6   # input to detect standby status
 
-  readonly INTERNET_SERVER='http://google.com' # check network accessibility and get network time
+  # v5.31: HTTPS, not HTTP. Cleartext http://google.com responses can be
+  # served from carrier-proxy caches on 3G with a STALE Date header, which
+  # net_to_system then trusts - observed in the field as the clock stepping
+  # backwards ~15 min immediately after a "successful" sync. TLS responses
+  # can't be cached by middleboxes, so the Date header is always fresh.
+  readonly INTERNET_SERVER='https://www.google.com' # check network accessibility and get network time
 
   # reasons for startup/shutdown
   readonly REASON_ALARM1='0x01'
@@ -143,7 +148,7 @@ if [ -z ${I2C_MC_ADDRESS+x} ]; then
 
   TIME_UNKNOWN=0
 
-  SOFTWARE_VERSION='5.30'
+  SOFTWARE_VERSION='5.31'
 
   readonly LOCAL_TZ='Europe/London'
 fi
