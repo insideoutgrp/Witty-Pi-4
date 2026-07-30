@@ -11,8 +11,10 @@
 # firmware never drives the line, so presses are free for application use.
 #
 # Configuration lives in buttonRelay.conf next to this script. The conf
-# file is created with safe defaults (DISABLED) on first run and is NOT
-# in the deploy file list, so per-device settings survive fleet updates.
+# file is created on first run and is NOT in the deploy file list, so
+# per-device settings survive fleet updates. Default (v5.33+): 'auto' -
+# ENABLED on firmware Rev 14+ (clean button line), disabled on older
+# firmware. Default relay pin: BCM 23 (physical pin 16), toggle mode.
 #
 # CAUTION - firmware Rev <= 13: the microcontroller PULSES this same line
 # during alarm / low-voltage shutdowns (emulateButtonClick), which this
@@ -30,8 +32,12 @@ cur_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 TIME_UNKNOWN=0
 
 CONF="$cur_dir/buttonRelay.conf"
-if [ ! -f "$CONF" ]; then
-  cat > "$CONF" <<'CONFEOF'
+
+# v5.33: one-time migration. The v5.32 default conf shipped disabled with
+# RELAY_PIN=27; if the device's conf is still byte-identical to that old
+# default (never edited), replace it with the new defaults (auto-enable
+# on Rev 14+, RELAY_PIN=23). Any edited conf is left untouched.
+old_default=$(cat <<'OLDCONFEOF'
 # Witty Pi button->relay watcher configuration.
 # This file is per-device state: deploys never overwrite it.
 
@@ -55,23 +61,80 @@ RELAY_ACTIVE=1
 # Fire the relay action once at startup when this boot was caused by a
 # button press while the device was asleep (wake reason = click).
 RELAY_ON_WAKE_CLICK=0
+OLDCONFEOF
+)
+if [ -f "$CONF" ] && [ "$(cat "$CONF")" = "$old_default" ]; then
+  rm -f "$CONF"
+  log 'ButtonRelay: migrating untouched v5.32 default config to new defaults.'
+fi
+
+if [ ! -f "$CONF" ]; then
+  cat > "$CONF" <<'CONFEOF'
+# Witty Pi button->relay watcher configuration.
+# This file is per-device state: deploys never overwrite it.
+
+# Master switch:
+#   auto = enabled when the Witty Pi runs firmware Rev 14+ (the button
+#          line is clean there; on Rev <= 13 the MCU pulses it during
+#          alarm shutdowns, so auto stays off)
+#   1    = always on (any firmware - expect false triggers on Rev <= 13)
+#   0    = always off
+ENABLE_BUTTON_RELAY=auto
+
+# BCM pin driving the relay module (default 23 = physical pin 16; free on
+# Witty Pi 4 - the HAT itself uses BCM 2/3 (I2C), 4 (button), 14 (TXD),
+# 17 (SYS_UP)). Use a relay MODULE with a transistor/opto input, never a
+# bare relay coil - Pi GPIO cannot drive a coil and has no flyback diode.
+RELAY_PIN=23
+
+# 'toggle' = each press flips the relay state.
+# 'pulse'  = each press energises the relay for PULSE_SECONDS.
+RELAY_MODE=toggle
+PULSE_SECONDS=2
+
+# 1 if the relay module is active-HIGH, 0 if active-LOW.
+RELAY_ACTIVE=1
+
+# Fire the relay action once at startup when this boot was caused by a
+# button press while the device was asleep (wake reason = click).
+RELAY_ON_WAKE_CLICK=0
 CONFEOF
   chmod 644 "$CONF"
-  log 'ButtonRelay: created default buttonRelay.conf (disabled). Edit it to enable.'
+  log 'ButtonRelay: created default buttonRelay.conf (auto - enabled on Rev 14+ firmware).'
 fi
 . "$CONF"
 
-if [ "$ENABLE_BUTTON_RELAY" != "1" ]; then
-  exit 0
-fi
-
 BUTTON_PIN=4   # BCM - hardwired to the Witty Pi push button
 
-# warn on old firmware (it drives the button line during alarm shutdowns)
+# read the firmware revision once - drives both the auto-enable decision
+# and the old-firmware warning
 fw=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_FW_REVISION)
-if [[ $fw =~ ^0x[0-9a-fA-F]{2}$ ]] && [ $(($fw)) -lt 14 ]; then
-  log "ButtonRelay: WARNING - firmware Rev $(($fw)) pulses the button line during alarm shutdowns; expect false relay triggers there. Rev 14+ recommended."
+fw_rev=-1
+if [[ $fw =~ ^0x[0-9a-fA-F]{2}$ ]]; then
+  fw_rev=$(($fw))
 fi
+
+case "$ENABLE_BUTTON_RELAY" in
+  auto)
+    if [ $fw_rev -ge 14 ]; then
+      log "ButtonRelay: auto-enabled (firmware Rev $fw_rev)."
+    elif [ $fw_rev -ge 0 ]; then
+      log "ButtonRelay: auto mode - firmware Rev $fw_rev pulses the button line during alarm shutdowns; staying disabled (set ENABLE_BUTTON_RELAY=1 to force)."
+      exit 0
+    else
+      log 'ButtonRelay: auto mode - firmware revision unreadable; staying disabled this boot.'
+      exit 0
+    fi
+    ;;
+  1)
+    if [ $fw_rev -ge 0 ] && [ $fw_rev -lt 14 ]; then
+      log "ButtonRelay: WARNING - firmware Rev $fw_rev pulses the button line during alarm shutdowns; expect false relay triggers. Rev 14+ recommended."
+    fi
+    ;;
+  *)
+    exit 0
+    ;;
+esac
 
 RELAY_OFF=$((1 - RELAY_ACTIVE))
 

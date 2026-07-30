@@ -264,10 +264,11 @@ gpio -g write $SYSUP_PIN 0
 sleep 0.1
 gpio -g mode $SYSUP_PIN in
 
-# v5.32: optional button->relay watcher. The button line (BCM 4) is
-# unused while the Pi runs on Rev 14+ firmware, so presses are free for
-# application use. Disabled until buttonRelay.conf enables it; the
-# watcher outlives this script (spawned detached, lock fd closed).
+# v5.32: button->relay watcher. The button line (BCM 4) is unused while
+# the Pi runs on Rev 14+ firmware, so presses are free for application
+# use. v5.33: enabled by DEFAULT on Rev 14+ firmware ('auto' in
+# buttonRelay.conf, per-device overridable); the watcher outlives this
+# script (spawned detached, lock fd closed).
 "$cur_dir/buttonRelay.sh" >> "$cur_dir/wittyPi.log" 2>&1 9>&- &
 
 # no GPIO-4 soft shutdown - hardware will cut power directly
