@@ -113,7 +113,7 @@ if [ ! -z "$WITTYPI_DIR" ] && [ -f "$WITTYPI_DIR/utilities.sh" ]; then
   # version-first order left new utilities + old scripts and every rerun
   # said "already up to date" - locking the mixed install in permanently.
   # With version-last, an interrupted deploy simply reruns.
-  UPDATE_FILES="daemon.sh runScript.sh wittyPi.sh syncTime.sh checkInternet.sh utilities.sh"
+  UPDATE_FILES="daemon.sh runScript.sh wittyPi.sh syncTime.sh checkInternet.sh buttonRelay.sh utilities.sh"
 
   # backup
   BACKUP_DIR="$WITTYPI_DIR/backup_v${CURRENT_VER:-old}_$(date +%Y%m%d_%H%M%S)"
