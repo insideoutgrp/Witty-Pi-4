@@ -32,6 +32,12 @@ cur_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 TIME_UNKNOWN=0
 
+# v5.36: unconditional startup breadcrumb - if this line is missing from
+# wittyPi.log after a daemon start, the spawn itself never happened
+# (stale daemon.sh on the device); every exit below also logs its reason,
+# so "watcher not running" is always diagnosable from the log alone.
+log "ButtonRelay: starting (pid $$)."
+
 CONF="$cur_dir/buttonRelay.conf"
 
 # v5.33: one-time migration. The v5.32 default conf shipped disabled with
@@ -115,7 +121,11 @@ if ! touch "$PIDFILE" 2>/dev/null; then
   PIDFILE=/tmp/wittypi_buttonrelay.pid   # non-root fallback
 fi
 oldpid=$(cat "$PIDFILE" 2>/dev/null)
-if [[ "$oldpid" =~ ^[0-9]+$ ]] && [ "$oldpid" != "$$" ] && kill -0 "$oldpid" 2>/dev/null; then
+# v5.36: only kill the old pid if it really is a buttonRelay instance.
+# After a reboot the stale pidfile usually points at a REUSED pid owned
+# by some unrelated boot process - killing it blindly was a real hazard.
+if [[ "$oldpid" =~ ^[0-9]+$ ]] && [ "$oldpid" != "$$" ] && kill -0 "$oldpid" 2>/dev/null \
+   && grep -qa buttonRelay /proc/$oldpid/cmdline 2>/dev/null; then
   # reap the blocked `gpio wfi` child first, then the old watcher
   pkill -P "$oldpid" 2>/dev/null
   kill "$oldpid" 2>/dev/null
@@ -188,6 +198,7 @@ case "$ENABLE_BUTTON_RELAY" in
     fi
     ;;
   *)
+    log "ButtonRelay: disabled by config (ENABLE_BUTTON_RELAY=$ENABLE_BUTTON_RELAY)."
     exit 0
     ;;
 esac
