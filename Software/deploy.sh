@@ -179,6 +179,10 @@ if [ ! -z "$WITTYPI_DIR" ] && [ -f "$WITTYPI_DIR/utilities.sh" ]; then
   fi
   # also kill any orphaned runScript.sh from the previous daemon's background launch
   pkill -f "$WITTYPI_DIR/runScript.sh" 2>/dev/null && echo '  Stopped any active runScript.sh.'
+  # v4.51: also stop the button->relay watcher; the restarted daemon spawns
+  # a fresh one. Without this, watchers accumulated across deploys and each
+  # toggled the relay per press (two instances = no net pin change).
+  pkill -f "$WITTYPI_DIR/buttonRelay.sh" 2>/dev/null && echo '  Stopped old buttonRelay watcher.'
   sleep 1
   "$WITTYPI_DIR/daemon.sh" &
   sleep 1

@@ -104,6 +104,25 @@ if [ -f "$CONF" ] && { [ "$cur_conf" = "$old_default" ] || [ "$cur_conf" = "$old
   log 'ButtonRelay: migrating untouched default config to current defaults.'
 fi
 
+# v5.35: single-instance enforcement. The daemon spawns a watcher on
+# every boot AND on every deploy-triggered restart - without this,
+# watchers accumulate and EACH one toggles the relay per press. Two
+# instances with out-of-phase state cancel each other: the log shows
+# toggles but the pin never (reliably) changes. The newest instance
+# always replaces the oldest so config changes take effect immediately.
+PIDFILE=/var/run/wittypi_buttonrelay.pid
+if ! touch "$PIDFILE" 2>/dev/null; then
+  PIDFILE=/tmp/wittypi_buttonrelay.pid   # non-root fallback
+fi
+oldpid=$(cat "$PIDFILE" 2>/dev/null)
+if [[ "$oldpid" =~ ^[0-9]+$ ]] && [ "$oldpid" != "$$" ] && kill -0 "$oldpid" 2>/dev/null; then
+  # reap the blocked `gpio wfi` child first, then the old watcher
+  pkill -P "$oldpid" 2>/dev/null
+  kill "$oldpid" 2>/dev/null
+  log "ButtonRelay: replaced previous watcher (pid $oldpid)."
+fi
+echo $$ > "$PIDFILE" 2>/dev/null
+
 if [ ! -f "$CONF" ]; then
   cat > "$CONF" <<'CONFEOF'
 # Witty Pi button->relay watcher configuration.
@@ -187,13 +206,13 @@ fire_relay()
     gpio -g write $RELAY_PIN $RELAY_ACTIVE
     sleep $PULSE_SECONDS
     gpio -g write $RELAY_PIN $RELAY_OFF
-    log "ButtonRelay: pulse fired (${PULSE_SECONDS}s)."
+    log "ButtonRelay: relay (BCM $RELAY_PIN) pulse fired (${PULSE_SECONDS}s)."
   else
     relay_state=$((1 - relay_state))
     gpio -g write $RELAY_PIN $relay_state
     local st='OFF'
     [ $relay_state -eq $RELAY_ACTIVE ] && st='ON'
-    log "ButtonRelay: relay toggled $st."
+    log "ButtonRelay: relay (BCM $RELAY_PIN) toggled $st (level $relay_state)."
   fi
 }
 
