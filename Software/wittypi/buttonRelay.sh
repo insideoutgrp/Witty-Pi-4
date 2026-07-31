@@ -12,9 +12,10 @@
 #
 # Configuration lives in buttonRelay.conf next to this script. The conf
 # file is created on first run and is NOT in the deploy file list, so
-# per-device settings survive fleet updates. Default (v5.33+): 'auto' -
+# per-device settings survive fleet updates. Default (v5.34+): 'auto' -
 # ENABLED on firmware Rev 14+ (clean button line), disabled on older
-# firmware. Default relay pin: BCM 23 (physical pin 16), toggle mode.
+# firmware. Default relay pin: BCM 13 (physical pin 33, wiringPi 23),
+# toggle mode.
 #
 # CAUTION - firmware Rev <= 13: the microcontroller PULSES this same line
 # during alarm / low-voltage shutdowns (emulateButtonClick), which this
@@ -63,13 +64,10 @@ RELAY_ACTIVE=1
 RELAY_ON_WAKE_CLICK=0
 OLDCONFEOF
 )
-if [ -f "$CONF" ] && [ "$(cat "$CONF")" = "$old_default" ]; then
-  rm -f "$CONF"
-  log 'ButtonRelay: migrating untouched v5.32 default config to new defaults.'
-fi
-
-if [ ! -f "$CONF" ]; then
-  cat > "$CONF" <<'CONFEOF'
+# v5.34: the short-lived v5.33 default used RELAY_PIN=23 (a wiringPi
+# number given in error - the intended pin was BCM 13). Migrate that
+# untouched default too.
+old_default2=$(cat <<'OLD2CONFEOF'
 # Witty Pi button->relay watcher configuration.
 # This file is per-device state: deploys never overwrite it.
 
@@ -86,6 +84,45 @@ ENABLE_BUTTON_RELAY=auto
 # 17 (SYS_UP)). Use a relay MODULE with a transistor/opto input, never a
 # bare relay coil - Pi GPIO cannot drive a coil and has no flyback diode.
 RELAY_PIN=23
+
+# 'toggle' = each press flips the relay state.
+# 'pulse'  = each press energises the relay for PULSE_SECONDS.
+RELAY_MODE=toggle
+PULSE_SECONDS=2
+
+# 1 if the relay module is active-HIGH, 0 if active-LOW.
+RELAY_ACTIVE=1
+
+# Fire the relay action once at startup when this boot was caused by a
+# button press while the device was asleep (wake reason = click).
+RELAY_ON_WAKE_CLICK=0
+OLD2CONFEOF
+)
+cur_conf=$(cat "$CONF" 2>/dev/null)
+if [ -f "$CONF" ] && { [ "$cur_conf" = "$old_default" ] || [ "$cur_conf" = "$old_default2" ]; }; then
+  rm -f "$CONF"
+  log 'ButtonRelay: migrating untouched default config to current defaults.'
+fi
+
+if [ ! -f "$CONF" ]; then
+  cat > "$CONF" <<'CONFEOF'
+# Witty Pi button->relay watcher configuration.
+# This file is per-device state: deploys never overwrite it.
+
+# Master switch:
+#   auto = enabled when the Witty Pi runs firmware Rev 14+ (the button
+#          line is clean there; on Rev <= 13 the MCU pulses it during
+#          alarm shutdowns, so auto stays off)
+#   1    = always on (any firmware - expect false triggers on Rev <= 13)
+#   0    = always off
+ENABLE_BUTTON_RELAY=auto
+
+# BCM pin driving the relay module (default 13 = physical pin 33, i.e.
+# wiringPi pin 23; free on Witty Pi 4 - the HAT itself uses BCM 2/3
+# (I2C), 4 (button), 14 (TXD), 17 (SYS_UP)). Use a relay MODULE with a
+# transistor/opto input, never a bare relay coil - Pi GPIO cannot drive
+# a coil and has no flyback diode.
+RELAY_PIN=13
 
 # 'toggle' = each press flips the relay state.
 # 'pulse'  = each press energises the relay for PULSE_SECONDS.
