@@ -72,20 +72,34 @@ echo '|                                                                         
 echo '================================================================================'
 echo ''
 
-# detect existing installation
+# detect existing installation. NEVER resolve to /root: root-cron runs
+# (autoUpdate.sh, v4.53+) have no SUDO_USER and $HOME=/root — the v5 line
+# shipped shadow /root installs exactly this way until its v5.49 fix. The
+# fleet standard is the pi home, so prefer it outright.
 WITTYPI_DIR=""
-if [ -d "$HOME/wittypi" ]; then
-  WITTYPI_DIR="$HOME/wittypi"
-elif [ -d "/home/pi/wittypi" ]; then
-  WITTYPI_DIR="/home/pi/wittypi"
-elif [ ! -z "$SUDO_USER" ] && [ -d "$(eval echo ~$SUDO_USER)/wittypi" ]; then
-  WITTYPI_DIR="$(eval echo ~$SUDO_USER)/wittypi"
+for cand in "/home/pi/wittypi" \
+            "$([ -n "$SUDO_USER" ] && eval echo "~$SUDO_USER" || echo /nonexistent)/wittypi" \
+            "$HOME/wittypi"; do
+  case "$cand" in /root/*) continue ;; esac
+  [ -d "$cand" ] && { WITTYPI_DIR="$cand"; break; }
+done
+# retire any stray shadow install a root-context run may have left
+if [ -n "$WITTYPI_DIR" ] && [ -d /root/wittypi ]; then
+  echo '>>> Retiring stray shadow install at /root/wittypi (root-cron artefact)'
+  rm -rf /root/wittypi
 fi
 
-# download the repo
-echo ">>> Downloading from $REPO_URL"
-wget -q "$REPO_URL/archive/refs/heads/$BRANCH.tar.gz" -O "$TMP_DIR/wittypi.tar.gz" || {
-  echo 'Error: Failed to download. Check your internet connection.'
+# download the repo — API mirror first (site NAT IPs get 429-banned by
+# GitHub under fleet probing; the droplet caches one copy for everyone),
+# GitHub direct as fallback. gzip -t so an HTML error page saved as
+# .tar.gz cleanly triggers the fallback instead of a confusing tar error.
+fetch_tarball() {
+  wget -q "$1" -O "$TMP_DIR/wittypi.tar.gz" && gzip -t "$TMP_DIR/wittypi.tar.gz" 2>/dev/null
+}
+echo ">>> Downloading Witty-Pi-4 ($BRANCH)"
+{ [ "$BRANCH" = "main" ] && fetch_tarball "https://api.insideoutgroup.co.uk/v1/sw/legacy/main.tar.gz"; } \
+  || fetch_tarball "$REPO_URL/archive/refs/heads/$BRANCH.tar.gz" || {
+  echo 'Error: Failed to download from mirror or GitHub. Check your internet connection.'
   rm -rf "$TMP_DIR"
   exit 1
 }
@@ -113,7 +127,7 @@ if [ ! -z "$WITTYPI_DIR" ] && [ -f "$WITTYPI_DIR/utilities.sh" ]; then
   # version-first order left new utilities + old scripts and every rerun
   # said "already up to date" - locking the mixed install in permanently.
   # With version-last, an interrupted deploy simply reruns.
-  UPDATE_FILES="daemon.sh runScript.sh wittyPi.sh syncTime.sh checkInternet.sh buttonRelay.sh utilities.sh"
+  UPDATE_FILES="daemon.sh runScript.sh wittyPi.sh syncTime.sh checkInternet.sh buttonRelay.sh camera.sh autoUpdate.sh utilities.sh"
 
   # backup
   BACKUP_DIR="$WITTYPI_DIR/backup_v${CURRENT_VER:-old}_$(date +%Y%m%d_%H%M%S)"
@@ -227,6 +241,63 @@ if [ ! -z "$WITTYPI_DIR" ] && [ -f "$WITTYPI_DIR/utilities.sh" ]; then
   echo '  Cron job set: check internet every 15 min (at :07/:22/:37/:52).'
   # ensure the script is present and executable on device
   chmod +x "$WITTYPI_DIR/checkInternet.sh" 2>/dev/null
+
+  # ---- IOVision fleet additions (v4.53) — ported from the vision-service
+  # (v5) line so legacy-firmware devices join fleet management: daily
+  # camera settings snapshot, daily self-update (opt-in from the
+  # dashboard; see autoUpdate.sh), and the connector.
+  if ! command -v gphoto2 >/dev/null 2>&1; then
+    echo ''
+    echo '>>> Installing gphoto2 (camera.sh dependency)'
+    apt-get install -y -qq gphoto2 \
+      || echo '  WARN: gphoto2 install failed - camera.sh needs it; rerun deploy or install manually.'
+  fi
+  chmod +x "$WITTYPI_DIR/camera.sh" "$WITTYPI_DIR/autoUpdate.sh" 2>/dev/null || true
+  CAM_LOG_CMD="$WITTYPI_DIR/camera.sh logsettings >> $WITTYPI_DIR/wittyPi.log 2>&1"
+  AUTO_UPD_CMD="$WITTYPI_DIR/autoUpdate.sh >> $WITTYPI_DIR/wittyPi.log 2>&1"
+  (crontab -l 2>/dev/null | grep -vF 'logsettings' | grep -vF 'autoUpdate.sh'; \
+   echo "5,20,35,50 * * * * $CAM_LOG_CMD"; \
+   echo "12,27,42,57 * * * * $AUTO_UPD_CMD") | crontab -
+  echo '  Cron set: daily camera settings snapshot (attempts at :05/:20/:35/:50);'
+  echo '            daily auto-update check (attempts at :12/:27/:42/:57).'
+
+  # Connector code lands on EVERY device; it only RUNS where
+  # /etc/iovision/config.yaml exists (written at enrolment). Atomic .new +
+  # syntax gate, python files gated with py_compile — same rules as v5.
+  if [ -d "$SRC_DIR/connector" ]; then
+    echo ''
+    echo '>>> Updating connector (iovision fleet module)'
+    mkdir -p "$WITTYPI_DIR/connector"
+    for f in agent.py collect.sh vision-connector.service README.md; do
+      if [ -f "$SRC_DIR/connector/$f" ]; then
+        cp "$SRC_DIR/connector/$f" "$WITTYPI_DIR/connector/$f.new"
+        CONN_OK=1
+        case "$f" in
+          *.py) python3 -m py_compile "$WITTYPI_DIR/connector/$f.new" 2>/dev/null || CONN_OK=0 ;;
+          *.sh) bash -n "$WITTYPI_DIR/connector/$f.new" 2>/dev/null || CONN_OK=0 ;;
+        esac
+        if [ $CONN_OK -eq 1 ]; then
+          mv "$WITTYPI_DIR/connector/$f.new" "$WITTYPI_DIR/connector/$f"
+          echo "  Updated connector/$f"
+        else
+          rm -f "$WITTYPI_DIR/connector/$f.new"
+          echo "  SKIPPED connector/$f (syntax check failed - keeping previous version)"
+        fi
+      fi
+    done
+    chown -R pi:pi "$WITTYPI_DIR/connector" 2>/dev/null || true
+    if [ -f /etc/iovision/config.yaml ]; then
+      python3 -c 'import requests, yaml' 2>/dev/null \
+        || apt-get install -y -qq python3-requests python3-yaml \
+        || echo '  WARN: connector deps install failed - rerun deploy or install manually.'
+      cp "$WITTYPI_DIR/connector/vision-connector.service" /etc/systemd/system/vision-connector.service 2>/dev/null || true
+      systemctl daemon-reload 2>/dev/null || true
+      systemctl enable vision-connector.service 2>/dev/null || true
+      systemctl restart vision-connector.service 2>/dev/null \
+        && echo '  Connector restarted (enrolled device).' \
+        || echo '  WARN: connector failed to start - check: systemctl status vision-connector'
+    fi
+  fi
 
   # Strip any gpio-shutdown dtoverlay configured for GPIO-4 from the boot
   # config. The Witty Pi button is hardwired to both PIN_BUTTON on the
